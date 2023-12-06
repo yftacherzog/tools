@@ -18,6 +18,7 @@ class ODCSConfigurationsGenerator(ComposeConfigurationsGenerator):
     :param container_data: data loaded from container.yaml
     :param content_sets_data: data loaded from content_sets.yaml
     """
+
     container_data: dict
     content_sets_data: dict
 
