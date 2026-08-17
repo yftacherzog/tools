@@ -17,23 +17,103 @@ from verify_rpms import rpm_verifier
 from verify_rpms.rpm_verifier import (
     ImageProcessor,
     ProcessedImage,
+    _format_run_summary,
     _is_transient_error,
     aggregate_results,
+    compute_layer_selectors,
     generate_image_output,
     generate_image_results,
     generate_processed_image_digests,
     get_images_from_inspection,
     get_rpmdb,
+    get_rpmdb_layer_indices,
     get_rpms_data,
     get_signed_rpms_keys,
     get_unsigned_rpms,
     inspect_image_ref,
+    inspect_raw_manifest,
     set_output_and_status,
 )
 
+MODELCAR_MANIFEST: dict[str, Any] = {
+    "schemaVersion": 2,
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "config": {
+        "mediaType": "application/vnd.oci.image.config.v1+json",
+        "size": 5580,
+        "digest": "sha256:configdigest",
+    },
+    "layers": [
+        {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "size": 7241176,
+            "digest": "sha256:baselayerdigest",
+        },
+        {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar",
+            "size": 10240,
+            "digest": "sha256:modellayer1",
+            "annotations": {
+                "org.opencontainers.image.title": "config.json",
+                "olot.layer.content.inlayerpath": "/models/config.json",
+                "olot.layer.content.type": "file",
+            },
+        },
+        {
+            "mediaType": "application/vnd.oci.image.layer.v1.tar",
+            "size": 378880,
+            "digest": "sha256:modellayer2",
+            "annotations": {
+                "org.opencontainers.image.title": "pytorch_model.bin",
+                "olot.layer.content.inlayerpath": "/models/pytorch_model.bin",
+                "olot.layer.content.type": "file",
+            },
+        },
+    ],
+}
+
+IMAGE_INDEX_MANIFEST: dict[str, Any] = {
+    "schemaVersion": 2,
+    "mediaType": "application/vnd.oci.image.index.v1+json",
+    "manifests": [
+        {
+            "digest": "sha256:amd64digest",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "platform": {"architecture": "amd64", "os": "linux"},
+        },
+        {
+            "digest": "sha256:arm64digest",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "platform": {"architecture": "arm64", "os": "linux"},
+        },
+    ],
+}
+
+REGULAR_MANIFEST: dict[str, Any] = {
+    "schemaVersion": 2,
+    "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+    "config": {
+        "mediaType": "application/vnd.docker.container.image.v1+json",
+        "size": 13889,
+        "digest": "sha256:configdigest",
+    },
+    "layers": [
+        {
+            "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+            "size": 39307955,
+            "digest": "sha256:layer1",
+        },
+        {
+            "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+            "size": 123637579,
+            "digest": "sha256:layer2",
+        },
+    ],
+}
+
 
 def test_get_rpmdb(tmp_path: Path) -> None:
-    """Test get_rpmdb"""
+    """Test get_rpmdb without layer selector"""
     image = "my-image"
     mock_runner = create_autospec(run)
     out = get_rpmdb(
@@ -50,7 +130,52 @@ def test_get_rpmdb(tmp_path: Path) -> None:
         "--path",
         f"/var/lib/rpm/:{tmp_path}",
     ]
-    assert mock_runner.call_count == 1
+    assert out == tmp_path
+
+
+def test_get_rpmdb_with_layer_selector(tmp_path: Path) -> None:
+    """Test get_rpmdb with layer selectors"""
+    image = "my-image@sha256:abc123"
+    mock_runner = create_autospec(run)
+    out = get_rpmdb(
+        container_image=image,
+        target_dir=tmp_path,
+        runner=mock_runner,
+        layer_selectors=["[0]"],
+    )
+    mock_runner.assert_called_once()
+    assert mock_runner.call_args.args[0] == [
+        "oc",
+        "image",
+        "extract",
+        "my-image@sha256:abc123[0]",
+        "--path",
+        f"/var/lib/rpm/:{tmp_path}",
+    ]
+    assert out == tmp_path
+
+
+def test_get_rpmdb_with_multiple_layer_selectors(tmp_path: Path) -> None:
+    """Test get_rpmdb with multiple layer selectors produces multiple image args"""
+    image = "my-image@sha256:abc123"
+    mock_runner = create_autospec(run)
+    out = get_rpmdb(
+        container_image=image,
+        target_dir=tmp_path,
+        runner=mock_runner,
+        layer_selectors=["[0]", "[3]", "[9]"],
+    )
+    mock_runner.assert_called_once()
+    assert mock_runner.call_args.args[0] == [
+        "oc",
+        "image",
+        "extract",
+        "my-image@sha256:abc123[0]",
+        "my-image@sha256:abc123[3]",
+        "my-image@sha256:abc123[9]",
+        "--path",
+        f"/var/lib/rpm/:{tmp_path}",
+    ]
     assert out == tmp_path
 
 
@@ -222,7 +347,7 @@ def test_inspect_image_ref() -> None:
         "skopeo",
         "inspect",
         "--raw",
-        f"docker://{':'.join(image_url.split(':')[:-1])}@{image_digest}",
+        f"docker://{image_url.rsplit(':', 1)[0]}@{image_digest}",
     ]
     assert mock_runner.call_count == 1
 
@@ -941,16 +1066,30 @@ class TestImageProcessor:
         )
 
 
+def test_format_run_summary() -> None:
+    """Test _format_run_summary produces the expected output format"""
+    result = _format_run_summary(
+        output="Image: img1\nNo unsigned RPMs found\n",
+        results={"keys": {"abc123": 2, "unsigned": 0}},
+        images_processed={"image": {"pullspec": "img1:tag", "digests": ["sha256:abc"]}},
+    )
+    assert result == (
+        "Image: img1\nNo unsigned RPMs found\n\n"
+        "Final results:\n"
+        '{"keys": {"abc123": 2, "unsigned": 0}}\n'
+        "Images processed:\n"
+        '{"image": {"pullspec": "img1:tag", "digests": ["sha256:abc"]}}'
+    )
+
+
 class TestMain:
     """Testing main"""
 
     @pytest.fixture()
     def mock_image_processor(self, monkeypatch: MonkeyPatch) -> MagicMock:
         """Mock ImageProcessor"""
-        mock: MagicMock = create_autospec(
-            ImageProcessor,
-            return_value=MagicMock(return_value="some output"),
-        )
+        mock = create_autospec(ImageProcessor, instance=False)
+        mock.return_value = MagicMock(return_value="some output")
         monkeypatch.setattr(rpm_verifier, ImageProcessor.__name__, mock)
         return mock
 
@@ -981,29 +1120,27 @@ class TestMain:
         """Mock inspect_image_ref"""
         mock: MagicMock = create_autospec(
             inspect_image_ref,
-            return_value=MagicMock(
-                return_value={
-                    "schemaVersion": 2,
-                    "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
-                    "config": {
-                        "mediaType": "application/vnd.docker.container.image.v1+json",
-                        "size": 13889,
-                        "digest": "sha256:001122334455",
-                    },
-                    "layers": [
-                        {
-                            "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
-                            "size": 39307955,
-                            "digest": "sha256:554433221100",
-                        },
-                        {
-                            "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
-                            "size": 123637579,
-                            "digest": "sha256:9876543210",
-                        },
-                    ],
+            return_value={
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                "config": {
+                    "mediaType": "application/vnd.docker.container.image.v1+json",
+                    "size": 13889,
+                    "digest": "sha256:001122334455",
                 },
-            ),
+                "layers": [
+                    {
+                        "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+                        "size": 39307955,
+                        "digest": "sha256:554433221100",
+                    },
+                    {
+                        "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+                        "size": 123637579,
+                        "digest": "sha256:9876543210",
+                    },
+                ],
+            },
         )
         monkeypatch.setattr(rpm_verifier, inspect_image_ref.__name__, mock)
         return mock
@@ -1013,11 +1150,19 @@ class TestMain:
         """Mock get_images_from_inspection"""
         mock: MagicMock = create_autospec(
             get_images_from_inspection,
-            return_value=MagicMock(
-                return_value=["quay.io/test/image@sha256:1234567890"]
-            ),
+            return_value=["quay.io/test/image@sha256:1234567890"],
         )
         monkeypatch.setattr(rpm_verifier, get_images_from_inspection.__name__, mock)
+        return mock
+
+    @pytest.fixture()
+    def mock_compute_layer_selectors(self, monkeypatch: MonkeyPatch) -> MagicMock:
+        """Mock compute_layer_selectors to return no selectors (regular image)"""
+        mock: MagicMock = create_autospec(
+            compute_layer_selectors,
+            return_value={},
+        )
+        monkeypatch.setattr(rpm_verifier, compute_layer_selectors.__name__, mock)
         return mock
 
     @pytest.fixture()
@@ -1052,6 +1197,7 @@ class TestMain:
         mock_image_processor: MagicMock,
         mock_inspect_image_ref: MagicMock,
         mock_get_images_from_inspection: MagicMock,
+        mock_compute_layer_selectors: MagicMock,
         create_set_output_and_status_mock: MagicMock,
         mock_aggregate_results: MagicMock,
         mock_generate_images_processed_result: MagicMock,
@@ -1087,7 +1233,10 @@ class TestMain:
         )
         mock_inspect_image_ref.assert_called_once()
         mock_get_images_from_inspection.assert_called_once()
-        mock_image_processor.assert_called_once_with(tmp_path)
+        mock_compute_layer_selectors.assert_called_once()
+        call_kwargs = mock_image_processor.call_args.kwargs
+        assert call_kwargs["workdir"] == tmp_path
+        assert "db_getter" in call_kwargs
         set_output_and_status_mock.assert_called_once()
         mock_aggregate_results.assert_called_once()
         mock_generate_images_processed_result.assert_called_once()
@@ -1099,6 +1248,7 @@ class TestMain:
         mock_image_processor: MagicMock,  # pylint: disable=unused-argument
         mock_inspect_image_ref: MagicMock,  # pylint: disable=unused-argument
         mock_get_images_from_inspection: MagicMock,  # pylint: disable=unused-argument
+        mock_compute_layer_selectors: MagicMock,  # pylint: disable=unused-argument
         mock_aggregate_results: MagicMock,
         mock_generate_images_processed_result: MagicMock,
         tmp_path: Path,
@@ -1134,7 +1284,9 @@ class TestMain:
         assert images_processed_path.read_text() == json.dumps(
             mock_generate_images_processed_result.return_value
         )
-        mock_image_processor.assert_called_once_with(tmp_path)
+        call_kwargs = mock_image_processor.call_args.kwargs
+        assert call_kwargs["workdir"] == tmp_path
+        assert "db_getter" in call_kwargs
         set_output_and_status_mock.assert_called_once()
 
         assert (
@@ -1151,6 +1303,7 @@ class TestMain:
         mock_image_processor: MagicMock,
         mock_inspect_image_ref: MagicMock,
         mock_get_images_from_inspection: MagicMock,
+        mock_compute_layer_selectors: MagicMock,
         create_set_output_and_status_mock: MagicMock,
         mock_generate_image_output: MagicMock,
         mock_aggregate_results: MagicMock,
@@ -1205,6 +1358,7 @@ class TestMain:
         mock_image_processor: MagicMock,
         mock_inspect_image_ref: MagicMock,
         mock_get_images_from_inspection: MagicMock,
+        mock_compute_layer_selectors: MagicMock,
         create_set_output_and_status_mock: MagicMock,
         mock_generate_image_output: MagicMock,
         mock_aggregate_results: MagicMock,
@@ -1253,6 +1407,338 @@ class TestMain:
         mock_generate_image_output.assert_called_once()
         mock_aggregate_results.assert_not_called()
         mock_generate_images_processed_result.assert_not_called()
+
+    def test_main_with_selective_extraction(
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        mock_image_processor: MagicMock,
+        mock_inspect_image_ref: MagicMock,
+        mock_get_images_from_inspection: MagicMock,
+        create_set_output_and_status_mock: MagicMock,
+        mock_aggregate_results: MagicMock,
+        mock_generate_images_processed_result: MagicMock,
+        monkeypatch: MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Test main enables selective extraction for ModelCar images"""
+        mock_selectors = create_autospec(
+            compute_layer_selectors,
+            return_value={
+                "quay.io/test/image@sha256:1234567890": ["[0]"],
+            },
+        )
+        monkeypatch.setattr(
+            rpm_verifier, compute_layer_selectors.__name__, mock_selectors
+        )
+
+        create_set_output_and_status_mock(with_failures=False)
+
+        rpm_verifier.main(  # pylint: disable=no-value-for-parameter
+            args=[
+                "--image-url",
+                "quay.io/test/image:tag",
+                "--image-digest",
+                "sha256:1234567890",
+                "--workdir",
+                tmp_path,
+            ],
+            obj={},
+            standalone_mode=False,
+        )
+        mock_selectors.assert_called_once()
+        call_kwargs = mock_image_processor.call_args.kwargs
+        assert "db_getter" in call_kwargs
+        assert call_kwargs["workdir"] == tmp_path
+
+    def test_db_getter_closure_passes_selectors_to_get_rpmdb(
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        mock_image_processor: MagicMock,
+        mock_inspect_image_ref: MagicMock,
+        mock_get_images_from_inspection: MagicMock,
+        create_set_output_and_status_mock: MagicMock,
+        mock_aggregate_results: MagicMock,
+        mock_generate_images_processed_result: MagicMock,
+        monkeypatch: MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Test that the db_getter closure passes layer_selectors to get_rpmdb"""
+        expected_selectors = ["[0]"]
+        image_ref = "quay.io/test/image@sha256:1234567890"
+        mock_selectors = create_autospec(
+            compute_layer_selectors,
+            return_value={image_ref: expected_selectors},
+        )
+        monkeypatch.setattr(
+            rpm_verifier, compute_layer_selectors.__name__, mock_selectors
+        )
+        mock_get_rpmdb = create_autospec(get_rpmdb, return_value=tmp_path)
+        monkeypatch.setattr(rpm_verifier, get_rpmdb.__name__, mock_get_rpmdb)
+
+        create_set_output_and_status_mock(with_failures=False)
+
+        rpm_verifier.main(  # pylint: disable=no-value-for-parameter
+            args=[
+                "--image-url",
+                "quay.io/test/image:tag",
+                "--image-digest",
+                "sha256:1234567890",
+                "--workdir",
+                tmp_path,
+            ],
+            obj={},
+            standalone_mode=False,
+        )
+
+        db_getter = mock_image_processor.call_args.kwargs["db_getter"]
+        target_dir = Path("/tmp/test")
+        db_getter(image_ref, target_dir)
+
+        mock_get_rpmdb.assert_called_once_with(
+            container_image=image_ref,
+            target_dir=target_dir,
+            runner=run,
+            layer_selectors=expected_selectors,
+        )
+
+    def test_db_getter_closure_passes_none_for_unknown_image(
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        mock_image_processor: MagicMock,
+        mock_inspect_image_ref: MagicMock,
+        mock_get_images_from_inspection: MagicMock,
+        create_set_output_and_status_mock: MagicMock,
+        mock_aggregate_results: MagicMock,
+        mock_generate_images_processed_result: MagicMock,
+        monkeypatch: MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Test that the db_getter closure passes None when image has no selectors"""
+        mock_selectors = create_autospec(
+            compute_layer_selectors,
+            return_value={},
+        )
+        monkeypatch.setattr(
+            rpm_verifier, compute_layer_selectors.__name__, mock_selectors
+        )
+        mock_get_rpmdb = create_autospec(get_rpmdb, return_value=tmp_path)
+        monkeypatch.setattr(rpm_verifier, get_rpmdb.__name__, mock_get_rpmdb)
+
+        create_set_output_and_status_mock(with_failures=False)
+
+        rpm_verifier.main(  # pylint: disable=no-value-for-parameter
+            args=[
+                "--image-url",
+                "quay.io/test/image:tag",
+                "--image-digest",
+                "sha256:1234567890",
+                "--workdir",
+                tmp_path,
+            ],
+            obj={},
+            standalone_mode=False,
+        )
+
+        db_getter = mock_image_processor.call_args.kwargs["db_getter"]
+        target_dir = Path("/tmp/test")
+        db_getter("quay.io/other/image@sha256:unknown", target_dir)
+
+        mock_get_rpmdb.assert_called_once_with(
+            container_image="quay.io/other/image@sha256:unknown",
+            target_dir=target_dir,
+            runner=run,
+            layer_selectors=None,
+        )
+
+    def test_main_image_index_with_modelcar_selectors(
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        mock_image_processor: MagicMock,
+        mock_inspect_image_ref: MagicMock,
+        mock_get_images_from_inspection: MagicMock,
+        create_set_output_and_status_mock: MagicMock,
+        mock_aggregate_results: MagicMock,
+        mock_generate_images_processed_result: MagicMock,
+        monkeypatch: MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Test full path: image index -> multi-arch resolution -> ModelCar selectors"""
+        mock_inspect_image_ref.return_value = IMAGE_INDEX_MANIFEST
+
+        arch_images = [
+            "quay.io/test/image@sha256:amd64digest",
+            "quay.io/test/image@sha256:arm64digest",
+        ]
+        mock_get_images_from_inspection.return_value = arch_images
+
+        mock_inspect_raw = create_autospec(
+            inspect_raw_manifest, return_value=MODELCAR_MANIFEST
+        )
+        monkeypatch.setattr(
+            rpm_verifier, inspect_raw_manifest.__name__, mock_inspect_raw
+        )
+
+        mock_get_rpmdb = create_autospec(get_rpmdb, return_value=tmp_path)
+        monkeypatch.setattr(rpm_verifier, get_rpmdb.__name__, mock_get_rpmdb)
+
+        create_set_output_and_status_mock(with_failures=False)
+
+        rpm_verifier.main(  # pylint: disable=no-value-for-parameter
+            args=[
+                "--image-url",
+                "quay.io/test/image:tag",
+                "--image-digest",
+                "sha256:indexdigest",
+                "--workdir",
+                tmp_path,
+            ],
+            obj={},
+            standalone_mode=False,
+        )
+
+        assert mock_inspect_raw.call_count == 2
+        mock_inspect_raw.assert_any_call(arch_images[0], run)
+        mock_inspect_raw.assert_any_call(arch_images[1], run)
+
+        db_getter = mock_image_processor.call_args.kwargs["db_getter"]
+        target_dir = Path("/tmp/test")
+
+        for img in arch_images:
+            mock_get_rpmdb.reset_mock()
+            db_getter(img, target_dir)
+            mock_get_rpmdb.assert_called_once_with(
+                container_image=img,
+                target_dir=target_dir,
+                runner=run,
+                layer_selectors=["[0]"],
+            )
+
+    def test_prefetch_single_image_manifest(
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        mock_image_processor: MagicMock,
+        mock_get_images_from_inspection: MagicMock,
+        create_set_output_and_status_mock: MagicMock,
+        mock_aggregate_results: MagicMock,  # pylint: disable=unused-argument
+        mock_generate_images_processed_result: MagicMock,  # pylint: disable=unused-argument
+        monkeypatch: MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Single-image manifest (has layers, no manifests) prefetches to avoid redundant call"""
+        manifest = REGULAR_MANIFEST
+        mock_inspect = create_autospec(inspect_image_ref, return_value=manifest)
+        monkeypatch.setattr(rpm_verifier, inspect_image_ref.__name__, mock_inspect)
+
+        mock_selectors = create_autospec(compute_layer_selectors, return_value={})
+        monkeypatch.setattr(
+            rpm_verifier, compute_layer_selectors.__name__, mock_selectors
+        )
+
+        create_set_output_and_status_mock(with_failures=False)
+
+        rpm_verifier.main(  # pylint: disable=no-value-for-parameter
+            args=[
+                "--image-url",
+                "quay.io/test/image:tag",
+                "--image-digest",
+                "sha256:1234567890",
+                "--workdir",
+                tmp_path,
+            ],
+            obj={},
+            standalone_mode=False,
+        )
+
+        mock_selectors.assert_called_once()
+        _, call_kwargs = mock_selectors.call_args
+        assert call_kwargs["manifests"] == {
+            "quay.io/test/image@sha256:1234567890": manifest
+        }
+
+    def test_prefetch_skipped_for_image_index(
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        mock_image_processor: MagicMock,
+        mock_get_images_from_inspection: MagicMock,
+        create_set_output_and_status_mock: MagicMock,
+        mock_aggregate_results: MagicMock,  # pylint: disable=unused-argument
+        mock_generate_images_processed_result: MagicMock,  # pylint: disable=unused-argument
+        monkeypatch: MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Image index manifest (has manifests, no layers) does not prefetch"""
+        mock_inspect = create_autospec(
+            inspect_image_ref, return_value=IMAGE_INDEX_MANIFEST
+        )
+        monkeypatch.setattr(rpm_verifier, inspect_image_ref.__name__, mock_inspect)
+
+        mock_selectors = create_autospec(compute_layer_selectors, return_value={})
+        monkeypatch.setattr(
+            rpm_verifier, compute_layer_selectors.__name__, mock_selectors
+        )
+
+        create_set_output_and_status_mock(with_failures=False)
+
+        rpm_verifier.main(  # pylint: disable=no-value-for-parameter
+            args=[
+                "--image-url",
+                "quay.io/test/image:tag",
+                "--image-digest",
+                "sha256:indexdigest",
+                "--workdir",
+                tmp_path,
+            ],
+            obj={},
+            standalone_mode=False,
+        )
+
+        mock_selectors.assert_called_once()
+        _, call_kwargs = mock_selectors.call_args
+        assert call_kwargs["manifests"] is None
+
+    def test_prefetch_skipped_for_non_conforming_manifest(
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        mock_image_processor: MagicMock,
+        mock_get_images_from_inspection: MagicMock,
+        create_set_output_and_status_mock: MagicMock,
+        mock_aggregate_results: MagicMock,  # pylint: disable=unused-argument
+        mock_generate_images_processed_result: MagicMock,  # pylint: disable=unused-argument
+        monkeypatch: MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Non-conforming manifest with both layers and manifests does not prefetch"""
+        non_conforming = {
+            "schemaVersion": 2,
+            "layers": [{"digest": "sha256:abc"}],
+            "manifests": [{"digest": "sha256:def"}],
+        }
+        mock_inspect = create_autospec(inspect_image_ref, return_value=non_conforming)
+        monkeypatch.setattr(rpm_verifier, inspect_image_ref.__name__, mock_inspect)
+
+        mock_selectors = create_autospec(compute_layer_selectors, return_value={})
+        monkeypatch.setattr(
+            rpm_verifier, compute_layer_selectors.__name__, mock_selectors
+        )
+
+        create_set_output_and_status_mock(with_failures=False)
+
+        rpm_verifier.main(  # pylint: disable=no-value-for-parameter
+            args=[
+                "--image-url",
+                "quay.io/test/image:tag",
+                "--image-digest",
+                "sha256:1234567890",
+                "--workdir",
+                tmp_path,
+            ],
+            obj={},
+            standalone_mode=False,
+        )
+
+        mock_selectors.assert_called_once()
+        _, call_kwargs = mock_selectors.call_args
+        assert call_kwargs["manifests"] is None
 
 
 # ============================================================
@@ -1361,14 +1847,278 @@ class TestGetRpmdbRetry:
         assert mock_runner.call_count == 4
 
 
-class TestInspectImageRefRetry:
-    """Test retry behavior of inspect_image_ref"""
+def test_inspect_raw_manifest() -> None:
+    """Test inspect_raw_manifest calls skopeo correctly"""
+    mock_runner = create_autospec(run)
+    mock_runner.return_value.stdout = '{"schemaVersion": 2}'
+    image_ref = "quay.io/test/image@sha256:abc123"
+    result = inspect_raw_manifest(image_ref=image_ref, runner=mock_runner)
+    mock_runner.assert_called_once()
+    assert mock_runner.call_args.args[0] == [
+        "skopeo",
+        "inspect",
+        "--raw",
+        f"docker://{image_ref}",
+    ]
+    assert result == {"schemaVersion": 2}
+
+
+class TestGetRpmdbLayerIndices:
+    """Test get_rpmdb_layer_indices"""
+
+    def test_modelcar_manifest_skips_model_layers(self) -> None:
+        """Test that model layers with olot annotations are skipped"""
+        result = get_rpmdb_layer_indices(MODELCAR_MANIFEST)
+        assert result == [0]
+
+    def test_regular_manifest_keeps_all_layers(self) -> None:
+        """Test that layers without annotations are all kept"""
+        result = get_rpmdb_layer_indices(REGULAR_MANIFEST)
+        assert result == [0, 1]
+
+    def test_empty_manifest(self) -> None:
+        """Test manifest with no layers"""
+        result = get_rpmdb_layer_indices({"layers": []})
+        assert not result
+
+    def test_olot_layer_with_rpm_path_is_kept(self) -> None:
+        """Test that an olot layer pointing to RPM DB path is not skipped"""
+        manifest: dict[str, Any] = {
+            "layers": [
+                {
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                    "size": 100,
+                    "digest": "sha256:rpmlayer",
+                    "annotations": {
+                        "olot.layer.content.inlayerpath": "/var/lib/rpm/db.sqlite",
+                    },
+                },
+            ]
+        }
+        result = get_rpmdb_layer_indices(manifest)
+        assert result == [0]
+
+    def test_olot_layer_with_rpm_path_no_trailing_slash_is_kept(self) -> None:
+        """Test that inlayerpath pointing to /var/lib/rpm (no slash) is kept"""
+        manifest: dict[str, Any] = {
+            "layers": [
+                {
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                    "size": 100,
+                    "digest": "sha256:rpmlayer",
+                    "annotations": {
+                        "olot.layer.content.inlayerpath": "/var/lib/rpm",
+                        "olot.layer.content.type": "directory",
+                    },
+                },
+            ]
+        }
+        result = get_rpmdb_layer_indices(manifest)
+        assert result == [0]
+
+    def test_non_olot_annotations_are_ignored(self) -> None:
+        """Test that non-olot annotations don't trigger skipping"""
+        manifest: dict[str, Any] = {
+            "layers": [
+                {
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                    "size": 100,
+                    "digest": "sha256:layer1",
+                    "annotations": {
+                        "org.opencontainers.image.title": "some-file",
+                    },
+                },
+            ]
+        }
+        result = get_rpmdb_layer_indices(manifest)
+        assert result == [0]
+
+    def test_olot_annotation_missing_inlayerpath_is_included(self) -> None:
+        """Test that olot layer without inlayerpath is included for safety"""
+        manifest: dict[str, Any] = {
+            "layers": [
+                {
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                    "size": 100,
+                    "digest": "sha256:mystery",
+                    "annotations": {
+                        "olot.layer.content.type": "unknown",
+                    },
+                },
+            ]
+        }
+        result = get_rpmdb_layer_indices(manifest)
+        assert result == [0]
+
+    def test_null_annotations_treated_as_absent(self) -> None:
+        """Test that annotations: null doesn't crash"""
+        manifest: dict[str, Any] = {
+            "layers": [
+                {
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                    "size": 100,
+                    "digest": "sha256:layer1",
+                    "annotations": None,
+                },
+            ]
+        }
+        result = get_rpmdb_layer_indices(manifest)
+        assert result == [0]
+
+
+class TestComputeLayerSelectors:
+    """Test compute_layer_selectors"""
+
+    def test_modelcar_image_gets_selector(self) -> None:
+        """Test ModelCar image gets a layer selector"""
+        mock_runner = create_autospec(run)
+        mock_runner.return_value.stdout = json.dumps(MODELCAR_MANIFEST)
+        result = compute_layer_selectors(
+            ["registry/repo@sha256:abc"], runner=mock_runner
+        )
+        assert result == {"registry/repo@sha256:abc": ["[0]"]}
+
+    def test_regular_image_gets_no_selector(self) -> None:
+        """Test regular image produces no selector"""
+        mock_runner = create_autospec(run)
+        mock_runner.return_value.stdout = json.dumps(REGULAR_MANIFEST)
+        result = compute_layer_selectors(
+            ["registry/repo@sha256:abc"], runner=mock_runner
+        )
+        assert not result
+
+    def test_inspect_failure_is_skipped(self) -> None:
+        """Test that inspect failures are silently skipped"""
+        mock_runner = create_autospec(run)
+        mock_runner.side_effect = CalledProcessError(1, "skopeo", stderr="error")
+        result = compute_layer_selectors(
+            ["registry/repo@sha256:abc"], runner=mock_runner
+        )
+        assert not result
+
+    def test_non_dict_manifest_is_skipped(self) -> None:
+        """Test that a non-dict manifest (e.g. JSON array) is silently skipped"""
+        mock_runner = create_autospec(run)
+        mock_runner.return_value.stdout = json.dumps([{"not": "a manifest"}])
+        result = compute_layer_selectors(
+            ["registry/repo@sha256:abc"], runner=mock_runner
+        )
+        assert not result
+
+    def test_non_json_manifest_is_skipped(self) -> None:
+        """Test that invalid JSON from inspect is silently skipped"""
+        mock_runner = create_autospec(run)
+        mock_runner.return_value.stdout = "not valid json"
+        result = compute_layer_selectors(
+            ["registry/repo@sha256:abc"], runner=mock_runner
+        )
+        assert not result
+
+    def test_non_contiguous_layer_selectors(self) -> None:
+        """Test that non-contiguous skippable layers produce correct selectors"""
+        manifest: dict[str, Any] = {
+            "schemaVersion": 2,
+            "layers": [
+                {
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                    "size": 100,
+                    "digest": "sha256:base",
+                },
+                {
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                    "size": 200,
+                    "digest": "sha256:model1",
+                    "annotations": {
+                        "olot.layer.content.inlayerpath": "/models/a.bin",
+                        "olot.layer.content.type": "file",
+                    },
+                },
+                {
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                    "size": 300,
+                    "digest": "sha256:mid",
+                },
+                {
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                    "size": 400,
+                    "digest": "sha256:model2",
+                    "annotations": {
+                        "olot.layer.content.inlayerpath": "/models/b.bin",
+                        "olot.layer.content.type": "file",
+                    },
+                },
+            ],
+        }
+        mock_runner = create_autospec(run)
+        mock_runner.return_value.stdout = json.dumps(manifest)
+        result = compute_layer_selectors(
+            ["registry/repo@sha256:abc"], runner=mock_runner
+        )
+        assert result == {"registry/repo@sha256:abc": ["[0]", "[2]"]}
+
+    def test_all_layers_skippable_returns_no_selector(self) -> None:
+        """Test that an image where all layers are OLOT-annotated gets no selector"""
+        manifest: dict[str, Any] = {
+            "schemaVersion": 2,
+            "layers": [
+                {
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                    "size": 200,
+                    "digest": "sha256:model1",
+                    "annotations": {
+                        "olot.layer.content.inlayerpath": "/models/a.bin",
+                        "olot.layer.content.type": "file",
+                    },
+                },
+                {
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                    "size": 400,
+                    "digest": "sha256:model2",
+                    "annotations": {
+                        "olot.layer.content.inlayerpath": "/models/b.bin",
+                        "olot.layer.content.type": "file",
+                    },
+                },
+            ],
+        }
+        mock_runner = create_autospec(run)
+        mock_runner.return_value.stdout = json.dumps(manifest)
+        result = compute_layer_selectors(
+            ["registry/repo@sha256:abc"], runner=mock_runner
+        )
+        assert not result
+
+    def test_mixed_images(self) -> None:
+        """Test mix of ModelCar and regular images"""
+        mock_runner = create_autospec(run)
+        mock_runner.return_value.stdout = json.dumps(MODELCAR_MANIFEST)
+
+        def side_effect(*args, **kwargs):  # pylint: disable=unused-argument
+            img_arg = args[0][3]
+            result = MagicMock()
+            if "modelcar" in img_arg:
+                result.stdout = json.dumps(MODELCAR_MANIFEST)
+            else:
+                result.stdout = json.dumps(REGULAR_MANIFEST)
+            return result
+
+        mock_runner.side_effect = side_effect
+        result = compute_layer_selectors(
+            ["registry/modelcar@sha256:a", "registry/regular@sha256:b"],
+            runner=mock_runner,
+        )
+        assert "registry/modelcar@sha256:a" in result
+        assert "registry/regular@sha256:b" not in result
+
+
+class TestInspectRawManifestRetry:
+    """Test retry behavior of inspect_raw_manifest"""
 
     @pytest.fixture(autouse=True)
     def _disable_wait(self, monkeypatch: MonkeyPatch) -> None:
         """Disable retry wait for fast tests"""
         monkeypatch.setattr(
-            inspect_image_ref.retry,  # type: ignore[attr-defined]
+            inspect_raw_manifest.retry,  # type: ignore[attr-defined]
             "wait",
             wait_none(),
         )
@@ -1383,24 +2133,22 @@ class TestInspectImageRefRetry:
         success_result.stdout = '{"schemaVersion": 2}'
         mock_runner.side_effect = [transient_error, success_result]
 
-        result = inspect_image_ref(
-            image_url="quay.io/test/image:tag",
-            image_digest="sha256:abc123",
+        result = inspect_raw_manifest(
+            image_ref="quay.io/test/image@sha256:abc",
             runner=mock_runner,
         )
         assert mock_runner.call_count == 2
         assert result == {"schemaVersion": 2}
 
     def test_no_retry_on_permanent_error(self) -> None:
-        """Test that permanent errors fail immediately without retry"""
+        """Test that permanent errors fail immediately"""
         mock_runner = create_autospec(run)
         permanent_error = CalledProcessError(1, "skopeo", stderr="manifest unknown")
         mock_runner.side_effect = permanent_error
 
         with pytest.raises(CalledProcessError):
-            inspect_image_ref(
-                image_url="quay.io/test/image:tag",
-                image_digest="sha256:abc123",
+            inspect_raw_manifest(
+                image_ref="quay.io/test/image@sha256:abc",
                 runner=mock_runner,
             )
         assert mock_runner.call_count == 1
@@ -1408,13 +2156,14 @@ class TestInspectImageRefRetry:
     def test_exhausts_retries(self) -> None:
         """Test that retries are exhausted after max attempts"""
         mock_runner = create_autospec(run)
-        transient_error = CalledProcessError(1, "skopeo", stderr="ETIMEDOUT")
+        transient_error = CalledProcessError(
+            1, "skopeo", stderr="503 Service Unavailable"
+        )
         mock_runner.side_effect = transient_error
 
         with pytest.raises(CalledProcessError):
-            inspect_image_ref(
-                image_url="quay.io/test/image:tag",
-                image_digest="sha256:abc123",
+            inspect_raw_manifest(
+                image_ref="quay.io/test/image@sha256:abc",
                 runner=mock_runner,
             )
         assert mock_runner.call_count == 4
