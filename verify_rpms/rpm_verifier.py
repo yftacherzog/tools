@@ -34,6 +34,12 @@ TRANSIENT_PATTERNS = [
     "etimedout",
 ]
 
+# OLOT (OCI Layers On Top) adds model-data layers to container images.
+# See https://github.com/containers/olot
+OLOT_ANNOTATION_PREFIX = "olot.layer.content."
+# No leading slash — matched against lstrip("/") paths in get_rpmdb_layer_indices.
+RPM_DB_PATHS = ("var/lib/rpm",)
+
 
 def _is_transient_error(exception: BaseException) -> bool:
     if isinstance(exception, CalledProcessError) and exception.stderr:
@@ -87,20 +93,30 @@ class ProcessedImage:
 
 
 @_retry_on_transient
-def get_rpmdb(container_image: str, target_dir: Path, runner: Callable = run) -> Path:
+def get_rpmdb(
+    container_image: str,
+    target_dir: Path,
+    runner: Callable = run,
+    layer_selectors: list[str] | None = None,
+) -> Path:
     """
     Extract RPM DB from a given container image reference
     :param container_image: the image to extract
     :param target_dir: the directory to extract the DB to
     :param runner: subprocess.run to run CLI commands
+    :param layer_selectors: optional oc layer selectors (e.g. ["[0]", "[3]"])
     :return: Path of the directory the DB extracted to
     """
+    if layer_selectors:
+        image_args = [f"{container_image}{s}" for s in layer_selectors]
+    else:
+        image_args = [container_image]
     runner(
         [
             "oc",
             "image",
             "extract",
-            container_image,
+            *image_args,
             "--path",
             f"/var/lib/rpm/:{target_dir}",
         ],
@@ -183,30 +199,23 @@ def generate_image_results(
     return results
 
 
-@_retry_on_transient
+def _pullspec_without_tag(image_url: str) -> str:
+    """Strip the trailing :tag from an image pullspec."""
+    return image_url.rsplit(":", 1)[0]
+
+
 def inspect_image_ref(
     image_url: str, image_digest: str, runner: Callable = run
 ) -> dict[str, Any]:
     """
-    Inspect the image reference by running Skopeo
+    Inspect the image reference and return its raw manifest.
     :param image_url: image url to inspect
     :param image_digest: image digest to inspect
     :param runner: subprocess.run to run CLI commands
-    :return: dictionary containing the inspection details
+    :return: dictionary containing the manifest
     """
-    image_with_digest = f"docker://{':'.join(image_url.split(':')[:-1])}@{image_digest}"
-    inspect = runner(
-        [  # pylint: disable=duplicate-code
-            "skopeo",
-            "inspect",
-            "--raw",
-            image_with_digest,
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return json.loads(inspect.stdout)
+    image_ref = f"{_pullspec_without_tag(image_url)}@{image_digest}"
+    return inspect_raw_manifest(image_ref, runner)
 
 
 def generate_image_output(image: str, unsigned_rpms: list[str], error: str) -> str:
@@ -242,11 +251,10 @@ def get_images_from_inspection(
     if "manifests" in inspect_results:
         manifests = inspect_results["manifests"]
         image_list = [
-            f"{':'.join(image_url.split(':')[:-1])}@" + man["digest"]
-            for man in manifests
+            f"{_pullspec_without_tag(image_url)}@{man['digest']}" for man in manifests
         ]
         return image_list
-    return [f"{':'.join(image_url.split(':')[:-1])}@{image_digest}"]
+    return [f"{_pullspec_without_tag(image_url)}@{image_digest}"]
 
 
 def set_output_and_status(
@@ -276,18 +284,14 @@ def aggregate_results(processed_image_list: list[ProcessedImage]) -> dict[str, A
     """
     aggregated_rpms_keys: list[str] = []
     aggregated_unsigned_rpms: list[str] = []
-    aggregated_results: dict[str, Any] = {}
 
     for image in processed_image_list:
         if image.error != "":
-            aggregated_results["error"] = image.error
-            return aggregated_results
+            return generate_image_results(image.error, [], [])
         aggregated_rpms_keys += image.signed_rpms_keys
         aggregated_unsigned_rpms += image.unsigned_rpms
 
-    aggregated_results["keys"] = dict(Counter(aggregated_rpms_keys).most_common())
-    aggregated_results["keys"]["unsigned"] = len(aggregated_unsigned_rpms)
-    return aggregated_results
+    return generate_image_results("", aggregated_rpms_keys, aggregated_unsigned_rpms)
 
 
 def generate_processed_image_digests(
@@ -308,6 +312,91 @@ def generate_processed_image_digests(
         [image_digest] + [image.image.split("@")[-1] for image in processed_images]
     )
     return {"image": {"pullspec": image_url, "digests": list(digests_set)}}
+
+
+@_retry_on_transient
+def inspect_raw_manifest(image_ref: str, runner: Callable = run) -> dict[str, Any]:
+    """
+    Inspect an image reference and return its raw manifest.
+    :param image_ref: full image reference (e.g. registry/repo@sha256:...)
+    :param runner: subprocess.run to run CLI commands
+    :return: parsed manifest dictionary
+    """
+    result = runner(
+        [
+            "skopeo",
+            "inspect",
+            "--raw",
+            f"docker://{image_ref}",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(result.stdout)
+
+
+def get_rpmdb_layer_indices(manifest: dict[str, Any]) -> list[int]:
+    """
+    Get the indices of layers that may contain RPM database files.
+
+    Layers with olot annotations pointing to non-RPM paths (e.g. model files)
+    are skipped. Layers without annotations are always included.
+    :param manifest: parsed image manifest dictionary
+    :return: list of zero-based layer indices that may contain RPM DB
+    """
+    indices: list[int] = []
+    for i, layer in enumerate(manifest.get("layers", [])):
+        annotations = layer.get("annotations") or {}
+        if any(k.startswith(OLOT_ANNOTATION_PREFIX) for k in annotations):
+            inlayerpath = annotations.get(f"{OLOT_ANNOTATION_PREFIX}inlayerpath", "")
+            if inlayerpath and not any(
+                inlayerpath.lstrip("/").startswith(p) for p in RPM_DB_PATHS
+            ):
+                continue
+        indices.append(i)
+    return indices
+
+
+def compute_layer_selectors(
+    images: list[str],
+    runner: Callable = run,
+    manifests: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, list[str]]:
+    """
+    Inspect each image manifest and compute layer selectors for images
+    that have skippable layers (e.g. ModelCar model data layers).
+    :param images: list of image references to inspect
+    :param runner: subprocess.run to run CLI commands
+    :param manifests: optional pre-fetched manifests to avoid redundant lookups
+    :return: mapping of image ref to its layer selector strings
+    """
+    selectors: dict[str, list[str]] = {}
+    for img in images:
+        try:
+            manifest = (manifests or {}).get(img)
+            if manifest is None:
+                manifest = inspect_raw_manifest(img, runner)
+            total = len(manifest.get("layers", []))
+            indices = get_rpmdb_layer_indices(manifest)
+            if indices and len(indices) < total:
+                selectors[img] = [f"[{i}]" for i in indices]
+                print(
+                    f"Selective extraction enabled for {img} "
+                    f"(skipping {total - len(indices)} of {total} layers)",
+                    file=sys.stderr,
+                )
+        except (
+            CalledProcessError,
+            json.JSONDecodeError,
+            AttributeError,
+            TypeError,
+        ) as exc:
+            print(
+                f"Layer selector computation skipped for {img}: {exc}",
+                file=sys.stderr,
+            )
+    return selectors
 
 
 @dataclass(frozen=True)
@@ -362,6 +451,19 @@ class ImageProcessor:
             )
 
 
+def _format_run_summary(
+    output: str, results: dict[str, Any], images_processed: dict[str, Any]
+) -> str:
+    """Format the final summary message for output or sys.exit."""
+    return (
+        f"{output}\n"
+        f"Final results:\n"
+        f"{json.dumps(results)}\n"
+        f"Images processed:\n"
+        f"{json.dumps(images_processed)}"
+    )
+
+
 @click.command()
 @click.option(
     "--image-url",
@@ -410,16 +512,26 @@ def main(  # pylint: disable=too-many-locals
         }
         images_processed_path.write_text(json.dumps(images_processed))
 
-        # Exit with error in case of failure to inspect the image
-        sys.exit(
-            f"{out}\n"
-            f"Final results:\n"
-            f"{json.dumps(result)}\n"
-            f"Images processed:\n"
-            f"{images_processed}"
+        sys.exit(_format_run_summary(out, result, images_processed))
+
+    # For single images (not indexes), process already contains the manifest
+    # with layers — pass it to avoid a redundant network call.
+    prefetched: dict[str, dict[str, Any]] | None = None
+    if "layers" in process and "manifests" not in process:
+        prefetched = {images[0]: process}
+
+    layer_selectors = compute_layer_selectors(images, manifests=prefetched)
+
+    def db_getter(image: str, target_dir: Path) -> Path:
+        return get_rpmdb(
+            container_image=image,
+            target_dir=target_dir,
+            runner=run,
+            layer_selectors=layer_selectors.get(image),
         )
 
-    processor = ImageProcessor(workdir=workdir)
+    processor = ImageProcessor(workdir=workdir, db_getter=db_getter)
+
     with ThreadPoolExecutor() as executor:
         processed_images: Iterable[ProcessedImage] = executor.map(processor, images)
     processed_images_list = list(processed_images)
@@ -436,24 +548,13 @@ def main(  # pylint: disable=too-many-locals
     )
     images_processed_path.write_text(json.dumps(images_processed))
 
+    summary = _format_run_summary(output, aggregated_results, images_processed)
     if failures_occurred:
         status_path.write_text("ERROR")
-        sys.exit(
-            f"{output}\n"
-            f"Final results:\n"
-            f"{json.dumps(aggregated_results)}\n"
-            f"Images processed:\n"
-            f"{json.dumps(images_processed)}"
-        )
+        sys.exit(summary)
     else:
         status_path.write_text("SUCCESS")
-        print(
-            f"{output}\n"
-            f"Final results:\n"
-            f"{json.dumps(aggregated_results)}\n"
-            f"Images processed:\n"
-            f"{json.dumps(images_processed)}"
-        )
+        print(summary)
 
 
 if __name__ == "__main__":
