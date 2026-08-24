@@ -21,11 +21,12 @@ PR targets them.
 
 ### Dockerfile (`Dockerfile`)
 
-- `curl` install script for Helm (live GitHub raw URL).
-- `wget` of `yq_linux_amd64` — **not** keyed to `TARGETARCH` (breaks or
-  mis-serves on `arm64` builds).
 - `yum install` and OpenShift client `curl` use `TARGETARCH` / `OCP_ARCH` for
   `oc` — pattern to **follow** for new arch-specific binaries.
+- Helm install uses pinned version with SHA-256 checksum verification and
+  `TARGETARCH` mapping (live-script / single-arch issues fixed; tracked by
+  Renovate). Still a network-at-build `curl` with no Cachi2 prefetch — same
+  class as the `oc` client fetch.
 
 ### Python packaging
 
@@ -68,7 +69,6 @@ git diff origin/main...HEAD -- Dockerfile '**/*.py' \
 
 Approve and optionally note:
 
-- Replaces hardcoded `yq_linux_amd64` with `${TARGETARCH}` mapping.
 - Adds or updates `prefetch-input` / documents Cachi2 config for new deps.
 - Removes unused network fetch or deprecated module usage.
 - Adds tests for `arm64` behavior when introducing arch-sensitive code.
