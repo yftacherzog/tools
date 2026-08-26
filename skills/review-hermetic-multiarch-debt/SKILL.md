@@ -73,7 +73,7 @@ deprecated dirs without new network behavior.
 ## Red flags
 
 New URL in `Dockerfile` `RUN`; new `Pipfile`/`pyproject.toml` dep;
-`yq_linux_amd64` or amd64-only binary URL; expanded deprecated package scope.
+amd64-only binary URL; expanded deprecated package scope.
 
 ## Related
 
