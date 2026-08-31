@@ -29,11 +29,19 @@ ADD --chown=root:root --chmod=644 data/ca-trust/* /etc/pki/ca-trust/source/ancho
 RUN /usr/bin/fix-permissions /tmp/src \
     && /usr/bin/update-ca-trust
 RUN yum install -y krb5-workstation skopeo jq
-RUN curl -L https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 ARG TARGETARCH
-# yq should be deprecated as it is not in use anymore
-RUN wget https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_amd64.tar.gz -O - |\
-    tar xz && mv yq_linux_amd64 /usr/bin/yq
+ARG HELM_VERSION=v3.21.4
+RUN case "${TARGETARCH}" in \
+        amd64) HELM_ARCH=amd64 ;; \
+        arm64) HELM_ARCH=arm64 ;; \
+        *)     echo "Unsupported arch: ${TARGETARCH}" && exit 1 ;; \
+    esac \
+    && curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors -o /tmp/helm.tar.gz "https://get.helm.sh/helm-${HELM_VERSION}-linux-${HELM_ARCH}.tar.gz" \
+    && curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors -o /tmp/helm.tar.gz.sha256 "https://get.helm.sh/helm-${HELM_VERSION}-linux-${HELM_ARCH}.tar.gz.sha256" \
+    && echo "$(awk '{print $1}' /tmp/helm.tar.gz.sha256)  /tmp/helm.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/helm.tar.gz --strip-components=1 -C /usr/local/bin "linux-${HELM_ARCH}/helm" \
+    && rm /tmp/helm.tar.gz /tmp/helm.tar.gz.sha256 \
+    && helm version
 COPY data/kerberos/krb5.conf /etc
 COPY --from=buildah-task-image /usr/bin/retry /usr/bin/
 
@@ -45,6 +53,6 @@ RUN \
         arm64) OCP_ARCH=arm64 ;; \
         *)     echo "Unsupported arch: ${TARGETARCH}" && exit 1 ;; \
     esac \
-    && curl -L "https://mirror.openshift.com/pub/openshift-v4/${OCP_ARCH}/clients/ocp/4.12.36/openshift-client-linux.tar.gz" \
+    && curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors "https://mirror.openshift.com/pub/openshift-v4/${OCP_ARCH}/clients/ocp/4.12.36/openshift-client-linux.tar.gz" \
        | tar -C /opt/app-root/bin/ -xvzf - oc \
     && /usr/libexec/s2i/assemble
