@@ -9,9 +9,7 @@ from typing import Final
 ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 PKGS: Final[list[str]] = [
     "tests",
-    "generate_compose",
     "verify_rpms",
-    "clean_spacerequests",
 ]
 
 

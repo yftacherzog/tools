@@ -4,8 +4,6 @@
         "baseos",
         "gpgcheck",
         "imagebuilder",
-        "keytab",
-        "odcs",
         "repofile",
         "rpms",
         "sigkeys"

@@ -4,9 +4,7 @@
 Repo guidance for AI/code agents working in `konflux-ci/tools`.
 
 ## Repo map
-- `generate_compose/`: deprecated ODCS compose code; only minimal maintenance while removal is planned.
 - `verify_rpms/`: RPM verification logic and CLI.
-- `clean_spacerequests/`: deprecated namespace/SpaceRequest cleanup tooling; avoid feature expansion.
 - `tests/`: pytest coverage for all tool modules.
 - `.tekton/`: Pipeline-as-Code definitions used in Konflux.
 
@@ -14,7 +12,6 @@ Repo guidance for AI/code agents working in `konflux-ci/tools`.
 - Python: use `pipenv` (see `Pipfile`, `Pipfile.lock`, and `.python-version`).
 - Install deps: `pipenv sync`
 - Run tests: `pipenv run pytest tests`
-- Run one test file: `pipenv run pytest tests/test_spacerequests_cleaner.py`
 - Format/lint helper: `./format.sh`
 
 ## Working conventions

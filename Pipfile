@@ -5,21 +5,13 @@ name = "pypi"
 
 [packages]
 click = "*"
-requests = "*"
 pytest = "*"
 black = "*"
 mypy = "*"
 pylint = "*"
 isort = "*"
-pyyaml = "*"
-types-pyyaml = "*"
-responses = "*"
-types-requests = "*"
-odcs = {extras = ["client"], version = "*"}
 appstudio-tools = {file = ".", editable = true}
 pylint-pytest = "*"
-authlib = "*"
-kubernetes = "*"
 pytest-cov = "*"
 tenacity = "*"
 
