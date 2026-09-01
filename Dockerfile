@@ -28,7 +28,7 @@ ADD . /tmp/src
 ADD --chown=root:root --chmod=644 data/ca-trust/* /etc/pki/ca-trust/source/anchors
 RUN /usr/bin/fix-permissions /tmp/src \
     && /usr/bin/update-ca-trust
-RUN yum install -y krb5-workstation skopeo jq
+RUN yum install -y skopeo jq
 ARG TARGETARCH
 ARG HELM_VERSION=v3.21.4
 RUN case "${TARGETARCH}" in \
@@ -42,7 +42,6 @@ RUN case "${TARGETARCH}" in \
     && tar -xzf /tmp/helm.tar.gz --strip-components=1 -C /usr/local/bin "linux-${HELM_ARCH}/helm" \
     && rm /tmp/helm.tar.gz /tmp/helm.tar.gz.sha256 \
     && helm version
-COPY data/kerberos/krb5.conf /etc
 COPY --from=buildah-task-image /usr/bin/retry /usr/bin/
 
 USER 1001

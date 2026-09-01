@@ -30,9 +30,7 @@
         "pylint",
         "isort",
         "pytest",
-        "pylint-pytest",
-        "types-pyyaml",
-        "types-requests"
+        "pylint-pytest"
       ],
       "matchDatasources": ["pypi"],
       "matchUpdateTypes": ["patch", "minor"],
@@ -44,11 +42,7 @@
       "groupName": "python-core-deps",
       "matchPackageNames": [
         "click",
-        "requests", 
-        "pyyaml",
-        "kubernetes",
-        "odcs",
-        "authlib"
+        "tenacity"
       ],
       "matchDatasources": ["pypi"],
       "automerge": false,

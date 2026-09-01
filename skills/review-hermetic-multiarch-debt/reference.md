@@ -32,18 +32,6 @@ PR targets them.
 
 - `Pipfile` / `pyproject.toml`: PyPI deps installed at image build via pipenv
   (s2i); not vendored in-repo.
-- `pyproject.toml` entry points still expose deprecated CLIs:
-  `odcs_compose_generator`, `odcs_ping`, `clean_spacerequests`.
-
-### Deprecated directories (minimal maintenance only)
-
-| Path | Status |
-|------|--------|
-| `generate_compose/` | ODCS compose; removal planned; uses `requests.get` |
-| `clean_spacerequests/` | SpaceRequest cleanup; avoid feature expansion |
-
-AGENTS.md: do not expand these; flag new features, dependencies, or tests that
-grow scope.
 
 ### Multi-arch in product logic
 

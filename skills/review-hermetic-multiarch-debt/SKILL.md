@@ -4,8 +4,7 @@ description: >-
   Use when reviewing konflux-ci/tools pull requests that touch Dockerfile,
   Pipfile, Pipfile.lock, pyproject.toml, .tekton/, container build scripts,
   Python dependencies, or runtime code shipped in the tools image; or when a PR
-  adds network fetches, unpinned downloads, arch-specific binaries, or expands
-  deprecated packages (generate_compose, clean_spacerequests).
+  adds network fetches, unpinned downloads, or arch-specific binaries.
 ---
 
 # Review Hermetic and Multi-Arch Debt (tools)
@@ -23,9 +22,7 @@ assumptions.
 | Signal | Result | Action |
 |--------|--------|--------|
 | Docs/tests only; no build or image impact | Out of scope | **Stop** |
-| Minimal bugfix in deprecated dir; no new deps/URLs/Dockerfile steps | Low risk | Flag only if debt signals below appear |
 | `Dockerfile`, deps, `.tekton/`, `verify_rpms/` runtime | In scope | Full pass |
-| New features/deps in `generate_compose/` or `clean_spacerequests/` | Debt | **Request changes** |
 | PR reduces debt (TARGETARCH, prefetch, remove fetch) | Positive | Approve |
 
 Konflux PR builds `linux/x86_64` + `linux/arm64`; hermetic defaults `false`.
@@ -41,7 +38,7 @@ Baseline debt and greps: [reference.md](reference.md).
 - Git/private deps without a hermetic story.
 
 **Skip:** unchanged legacy Dockerfile fetches; test mocks; narrow fixes in
-deprecated dirs without new network behavior.
+shipped runtime code without new network behavior.
 
 ## Multi-arch debt — flag when the PR **adds**
 
@@ -73,7 +70,7 @@ deprecated dirs without new network behavior.
 ## Red flags
 
 New URL in `Dockerfile` `RUN`; new `Pipfile`/`pyproject.toml` dep;
-amd64-only binary URL; expanded deprecated package scope.
+amd64-only binary URL.
 
 ## Related
 

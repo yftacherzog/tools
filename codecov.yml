@@ -13,10 +13,6 @@ coverage:
         target: 80%
         informational: true
 
-ignore:
-  - "generate_compose/**"
-  - "clean_spacerequests/**"
-
 flags:
   unit-tests:
     carryforward: true

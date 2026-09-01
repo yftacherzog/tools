@@ -9,21 +9,14 @@ description = "Tools for Red Hat AppStudio"
 readme = "README.md"
 requires-python = ">=3.12"
 license = {file = "LICENSE"}
-keywords = ["appstudio", "odcs", "rpm", "development"]
+keywords = ["appstudio", "rpm", "development"]
 dependencies = [
     "click",
-    "requests",
-    "pyyaml",
-    "odcs[client]",
-    "kubernetes",
     "tenacity",
 ]
 
 [project.scripts]
-odcs_compose_generator = "generate_compose.odcs_compose_generator:main"
-odcs_ping = "generate_compose.odcs_ping:main"
 rpm_verifier = "verify_rpms.rpm_verifier:main"
-clean_spacerequests = "clean_spacerequests.spacerequests_cleaner:main"
 
 [build-system]
 requires = ["setuptools>=82.0.1", "wheel"]
