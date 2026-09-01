@@ -31,6 +31,15 @@ jobs:
         run: pip install pipenv==$(cat .pipenv-version)
       - name: Create virtualenv
         run: pipenv sync
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
+        with:
+          go-version: "1.26.0"
+          cache-dependency-path: go.sum
+      - name: Build and test Go
+        run: |
+          go build -o /dev/null ./cmd/helm-chart-oci
+          go test ./cmd/helm-chart-oci/...
       - name: Run tests
         run: |
           pipenv run pytest --cov=verify_rpms --cov-report=xml:coverage.xml tests

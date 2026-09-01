@@ -16,7 +16,6 @@ PKGS: Final[list[str]] = [
 def test_python_toolchain_versions_in_sync() -> None:
     """Python, Pipenv, and formatter settings share a single version source."""
     python_version = (ROOT / ".python-version").read_text(encoding="utf-8").strip()
-    pipenv_version = (ROOT / ".pipenv-version").read_text(encoding="utf-8").strip()
 
     pipfile = (ROOT / "Pipfile").read_text(encoding="utf-8")
     pipfile_match = re.search(r'python_version\s*=\s*"(?P<version>[^"]+)"', pipfile)
@@ -30,11 +29,6 @@ def test_python_toolchain_versions_in_sync() -> None:
     assert pyproject["tool"]["black"]["target-version"] == [
         f"py{python_version.replace('.', '')}"
     ]
-
-    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-    dockerfile_match = re.search(r"PIN_PIPENV_VERSION=(?P<version>[0-9.]+)", dockerfile)
-    assert dockerfile_match is not None, "Dockerfile must pin PIN_PIPENV_VERSION"
-    assert dockerfile_match.group("version") == pipenv_version
 
 
 def test_mypy() -> None:

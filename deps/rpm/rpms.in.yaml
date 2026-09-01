@@ -1,0 +1,17 @@
+# https://github.com/konflux-ci/rpm-lockfile-prototype
+contentOrigin:
+  repofiles:
+    - ./ubi.repo
+
+packages:
+  - skopeo
+  - python3-pip
+
+arches:
+  - x86_64
+  - aarch64
+
+context:
+  containerfile: ../../Dockerfile
+
+installWeakDeps: false

@@ -31,6 +31,15 @@ spec:
     value:
     - linux/x86_64
     - linux/arm64
+  - name: hermetic
+    value: 'true'
+  - name: prefetch-input
+    value: |
+      [
+        {"type": "pip", "path": "deps/pip", "requirements_files": ["requirements.txt"], "requirements_build_files": ["requirements-build.txt"]},
+        {"type": "rpm", "path": "deps/rpm"},
+        {"type": "gomod", "path": "."}
+      ]
   pipelineRef:
     name: build-pipeline
   taskRunTemplate:
