@@ -258,6 +258,83 @@ var _ = Describe("Dependencies", func() {
 				To(BeAnExistingFile())
 		})
 
+		It("builds http:// dependencies with Chart.lock using default production config (0.3 parity)", func() {
+			repo := startHTTPChartRepo(archive, testDepChartName, testDepChartVersion, false)
+			defer repo.Cleanup()
+
+			chartDir := GinkgoT().TempDir()
+			writeParentChart(chartDir, testDepChartName, testDepChartVersion, repo.URL)
+			cfg := isolatedDependencyConfig(repo.Settings)
+
+			// Produce a real Chart.lock, then rebuild from lock only (caching-style).
+			Expect(buildDependenciesWith(chartDir, cfg)).To(Succeed())
+			Expect(os.RemoveAll(filepath.Join(chartDir, "charts"))).To(Succeed())
+
+			Expect(buildDependenciesWith(chartDir, cfg)).To(Succeed())
+			Expect(filepath.Join(chartDir, "charts", chartArchiveName(testDepChartName, testDepChartVersion))).
+				To(BeAnExistingFile())
+		})
+
+		It("builds http:// dependencies from different paths on the same host", func() {
+			stableArchive := packageTestChart("stable-chart", "1.0.0")
+			otherArchive := packageTestChart("other-chart", "2.0.0")
+			server := startSameHostMultiPathHTTPServer(map[string]sameHostChartEntry{
+				"stable-chart": {
+					pathPrefix: "stable",
+					version:    "1.0.0",
+					archive:    stableArchive,
+				},
+				"other-chart": {
+					pathPrefix: "experimental",
+					version:    "2.0.0",
+					archive:    otherArchive,
+				},
+			})
+			defer server.Cleanup()
+
+			chartDir := GinkgoT().TempDir()
+			writeParentWithDistinctHTTPDependencies(chartDir,
+				httpChartDependencyWithRepo{Name: "stable-chart", Version: "1.0.0", Repository: server.RepoURL("stable")},
+				httpChartDependencyWithRepo{Name: "other-chart", Version: "2.0.0", Repository: server.RepoURL("experimental")},
+			)
+			cfg := isolatedDependencyConfig(server.Settings)
+
+			Expect(buildDependenciesWith(chartDir, cfg)).To(Succeed())
+			Expect(os.RemoveAll(filepath.Join(chartDir, "charts"))).To(Succeed())
+
+			Expect(buildDependenciesWith(chartDir, cfg)).To(Succeed())
+			Expect(filepath.Join(chartDir, "charts", chartArchiveName("stable-chart", "1.0.0"))).
+				To(BeAnExistingFile())
+			Expect(filepath.Join(chartDir, "charts", chartArchiveName("other-chart", "2.0.0"))).
+				To(BeAnExistingFile())
+		})
+
+		It("builds multiple http:// dependencies from the same repo with Chart.lock (0.3 parity)", func() {
+			certManager := packageTestChart("cert-manager", "v1.21.1")
+			trustManager := packageTestChart("trust-manager", "v0.24.0")
+			repo := startMultiChartHTTPRepo(map[string]multiChartEntry{
+				"cert-manager":  {version: "v1.21.1", archive: certManager},
+				"trust-manager": {version: "v0.24.0", archive: trustManager},
+			}, false)
+			defer repo.Cleanup()
+
+			chartDir := GinkgoT().TempDir()
+			writeParentWithHTTPDependencies(chartDir, repo.URL,
+				httpChartDependency{Name: "cert-manager", Version: "v1.21.1"},
+				httpChartDependency{Name: "trust-manager", Version: "v0.24.0"},
+			)
+			cfg := isolatedDependencyConfig(repo.Settings)
+
+			Expect(buildDependenciesWith(chartDir, cfg)).To(Succeed())
+			Expect(os.RemoveAll(filepath.Join(chartDir, "charts"))).To(Succeed())
+
+			Expect(buildDependenciesWith(chartDir, cfg)).To(Succeed())
+			Expect(filepath.Join(chartDir, "charts", chartArchiveName("cert-manager", "v1.21.1"))).
+				To(BeAnExistingFile())
+			Expect(filepath.Join(chartDir, "charts", chartArchiveName("trust-manager", "v0.24.0"))).
+				To(BeAnExistingFile())
+		})
+
 		It("builds http:// dependencies", func() {
 			repo := startHTTPChartRepo(archive, testDepChartName, testDepChartVersion, false)
 			defer repo.Cleanup()
