@@ -73,20 +73,48 @@ var _ = Describe("Run", func() {
 
 		overwrite := false
 		Expect(helmchartoci.Run(context.Background(), helmchartoci.RunOptions{
-			Image:              "quay.io/org/product-v1-component:tag",
-			ChartVersion:       "1.0.0+test",
-			SourceCodeDir:      root,
-			ChartContext:       "chart",
-			OverwriteChartName: &overwrite,
-			Pusher:             pusher,
+			Image:                      "quay.io/org/product-v1-component:tag",
+			ChartVersion:               "1.0.0+test",
+			SourceCodeDir:              root,
+			ChartContext:               "chart",
+			OverwriteChartName:         &overwrite,
+			PushChartToImageRepository: true,
+			Pusher:                     pusher,
 		})).To(Succeed())
 
 		Expect(pusher.opts.ChartName).To(Equal("product-chart"))
+		Expect(pusher.opts.PushChartToImageRepository).To(BeTrue())
 
 		updated, err := os.ReadFile(filepath.Join(chartDir, "Chart.yaml"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(string(updated)).To(ContainSubstring("name: product-chart"))
 		Expect(string(updated)).NotTo(ContainSubstring("product-v1-component"))
+	})
+
+	It("ignores push to image repository when overwrite is enabled", func() {
+		root := GinkgoT().TempDir()
+		chartDir := filepath.Join(root, "chart")
+		Expect(os.MkdirAll(chartDir, 0o755)).To(Succeed())
+		writeChart(chartDir, "product-chart")
+
+		pusher := &fakePusher{
+			result: push.Result{
+				ImageURL:    "quay.io/org/stream-4-22:1.0.0_test",
+				ImageDigest: "sha256:deadbeef",
+			},
+		}
+
+		Expect(helmchartoci.Run(context.Background(), helmchartoci.RunOptions{
+			Image:                      "quay.io/org/stream-4-22:tag",
+			ChartVersion:               "1.0.0+test",
+			SourceCodeDir:              root,
+			ChartContext:               "chart",
+			PushChartToImageRepository: true,
+			Pusher:                     pusher,
+		})).To(Succeed())
+
+		Expect(pusher.opts.ChartName).To(Equal("stream-4-22"))
+		Expect(pusher.opts.PushChartToImageRepository).To(BeFalse())
 	})
 
 	It("defaults overwrite chart name to enabled", func() {

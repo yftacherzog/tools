@@ -60,6 +60,14 @@
 //   - name: from Chart.yaml when OVERWRITE_CHART_NAME is false (0.4 default true
 //     preserves 0.3: rewrite name from IMAGE repository basename). See
 //     ResolveChartName.
+//   - push path: when OVERWRITE_CHART_NAME is false, charts default to
+//     oci://<parent(IMAGE)>/<chart-name>:<version>. Set
+//     PUSH_CHART_TO_IMAGE_REPOSITORY=true (with OVERWRITE_CHART_NAME=false)
+//     to publish under the IMAGE repository (oci://<IMAGE>:<version>) for
+//     per-stream Konflux ImageRepositories. PUSH_CHART_TO_IMAGE_REPOSITORY is
+//     ignored when OVERWRITE_CHART_NAME is true. On the push-to-image-repository
+//     path only, Helm strict mode is disabled when the IMAGE repo basename
+//     differs from the Chart.yaml name.
 //   - version: not taken from Chart.yaml; see Versioning.
 //   - appVersion: not taken from Chart.yaml; see App version.
 //   - dependencies: built from Chart.yaml when .dependencies is present.

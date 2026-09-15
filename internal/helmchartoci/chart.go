@@ -40,11 +40,36 @@ func OverwriteChartNameEnabled(value *bool) bool {
 	return *value
 }
 
+// ParsePushChartToImageRepository interprets Tekton-style boolean strings. An
+// empty value defaults to false.
+func ParsePushChartToImageRepository(value string) (bool, error) {
+	return parseBoolParam(value, false, "PUSH_CHART_TO_IMAGE_REPOSITORY")
+}
+
+// EffectivePushChartToImageRepository applies the Tekton task contract:
+// PUSH_CHART_TO_IMAGE_REPOSITORY is honored only when OVERWRITE_CHART_NAME is
+// false. When overwrite is enabled, a requested push-to-image-repository is
+// ignored with a warning on stderr.
+func EffectivePushChartToImageRepository(pushToImageRepo bool, overwriteChartName *bool) bool {
+	if !pushToImageRepo {
+		return false
+	}
+	if OverwriteChartNameEnabled(overwriteChartName) {
+		fmt.Fprintln(os.Stderr, "PUSH_CHART_TO_IMAGE_REPOSITORY is ignored when OVERWRITE_CHART_NAME is true")
+		return false
+	}
+	return true
+}
+
 // ParseOverwriteChartName interprets Tekton-style boolean strings. An empty value
 // defaults to overwrite=true to preserve build-helm-chart-oci-ta 0.3 behavior.
 func ParseOverwriteChartName(value string) (bool, error) {
+	return parseBoolParam(value, true, "OVERWRITE_CHART_NAME")
+}
+
+func parseBoolParam(value string, defaultValue bool, paramName string) (bool, error) {
 	if value == "" {
-		return true, nil
+		return defaultValue, nil
 	}
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "true", "1", "yes":
@@ -52,7 +77,7 @@ func ParseOverwriteChartName(value string) (bool, error) {
 	case "false", "0", "no":
 		return false, nil
 	default:
-		return false, fmt.Errorf("invalid OVERWRITE_CHART_NAME value %q", value)
+		return false, fmt.Errorf("invalid %s value %q", paramName, value)
 	}
 }
 

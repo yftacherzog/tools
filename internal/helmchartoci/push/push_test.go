@@ -13,18 +13,43 @@ import (
 
 var _ = Describe("OCI references", func() {
 	DescribeTable("ociPushRef",
-		func(imageRepo, chartName, chartVersion, want string) {
-			Expect(ociPushRef(imageRepo, chartName, chartVersion)).To(Equal(want))
+		func(imageRepo, chartName, chartVersion string, pushToImageRepo bool, want string) {
+			Expect(ociPushRef(imageRepo, chartName, chartVersion, pushToImageRepo)).To(Equal(want))
 		},
 		Entry(
 			"nested tenant image path",
 			"quay.io/redhat-user-workloads/konflux-vanguard-tenant/tekton-tools/helm-chart-oci-e2e",
 			"helm-chart-oci-e2e",
 			"0.1.0+test",
+			false,
 			"oci://quay.io/redhat-user-workloads/konflux-vanguard-tenant/tekton-tools/helm-chart-oci-e2e:0.1.0+test",
 		),
-		Entry("simple quay repo", "quay.io/org/my-chart", "my-chart", "1.2.3", "oci://quay.io/org/my-chart:1.2.3"),
-		Entry("localhost with port", "localhost:5000/team/my-chart", "my-chart", "0.0.1", "oci://localhost:5000/team/my-chart:0.0.1"),
+		Entry("simple quay repo", "quay.io/org/my-chart", "my-chart", "1.2.3", false, "oci://quay.io/org/my-chart:1.2.3"),
+		Entry("localhost with port", "localhost:5000/team/my-chart", "my-chart", "0.0.1", false, "oci://localhost:5000/team/my-chart:0.0.1"),
+		Entry(
+			"decoupled chart name under tenant",
+			"quay.io/org/product-v1-component",
+			"product-chart",
+			"2.0.0",
+			false,
+			"oci://quay.io/org/product-chart:2.0.0",
+		),
+		Entry(
+			"stream repo with preserved chart name",
+			"quay.io/tenant/dpf-hcp-provisioner-chart-4-22",
+			"dpf-hcp-provisioner-chart",
+			"4.22.0",
+			true,
+			"oci://quay.io/tenant/dpf-hcp-provisioner-chart-4-22:4.22.0",
+		),
+		Entry(
+			"shared repo with push to image repository",
+			"quay.io/tenant/dpf-hcp-provisioner-chart",
+			"dpf-hcp-provisioner-chart",
+			"4.22.0",
+			true,
+			"oci://quay.io/tenant/dpf-hcp-provisioner-chart:4.22.0",
+		),
 	)
 
 	It("sanitizes chart version for OCI tags", func() {
@@ -40,16 +65,116 @@ var _ = Describe("OCI references", func() {
 		Entry("bare name", "my-chart", "my-chart"),
 	)
 
-	DescribeTable("pushedChartRef",
-		func(imageRepo, chartName, ociTag, want string) {
-			Expect(pushedChartRef(imageRepo, chartName, ociTag)).To(Equal(want))
+	DescribeTable("repoBasename",
+		func(imageRepo, want string) {
+			Expect(repoBasename(imageRepo)).To(Equal(want))
 		},
-		Entry("matching names", "quay.io/org/my-chart", "my-chart", "1.0.0_build", "quay.io/org/my-chart:1.0.0_build"),
-		Entry("decoupled chart and image basename", "quay.io/org/product-v1-component", "product-chart", "2.0.0", "quay.io/org/product-chart:2.0.0"),
+		Entry("quay repo", "quay.io/org/my-chart", "my-chart"),
+		Entry("bare name", "my-chart", "my-chart"),
+	)
+
+	DescribeTable("pushedChartRef",
+		func(imageRepo, chartName, ociTag string, pushToImageRepo bool, want string) {
+			Expect(pushedChartRef(imageRepo, chartName, ociTag, pushToImageRepo)).To(Equal(want))
+		},
+		Entry("matching names", "quay.io/org/my-chart", "my-chart", "1.0.0_build", false, "quay.io/org/my-chart:1.0.0_build"),
+		Entry("decoupled chart and image basename", "quay.io/org/product-v1-component", "product-chart", "2.0.0", false, "quay.io/org/product-chart:2.0.0"),
+		Entry(
+			"stream repo with preserved chart name",
+			"quay.io/tenant/dpf-hcp-provisioner-chart-4-22",
+			"dpf-hcp-provisioner-chart",
+			"4.22.0_build",
+			true,
+			"quay.io/tenant/dpf-hcp-provisioner-chart-4-22:4.22.0_build",
+		),
+	)
+
+	DescribeTable("chartOCIRepository",
+		func(imageRepo, chartName string, pushToImageRepo bool, want string) {
+			Expect(chartOCIRepository(imageRepo, chartName, pushToImageRepo)).To(Equal(want))
+		},
+		Entry("tenant chart path", "quay.io/org/product-v1", "product-chart", false, "quay.io/org/product-chart"),
+		Entry("stream repo path", "quay.io/tenant/chart-4-22", "product-chart", true, "quay.io/tenant/chart-4-22"),
+		Entry("matching image repo", "quay.io/tenant/product-chart", "product-chart", true, "quay.io/tenant/product-chart"),
+	)
+
+	DescribeTable("chartPushStrictMode",
+		func(imageRepo, chartName string, pushToImageRepo bool, want bool) {
+			Expect(chartPushStrictMode(imageRepo, chartName, pushToImageRepo)).To(Equal(want))
+		},
+		Entry("decoupled tenant path", "quay.io/org/product-v1", "product-chart", false, true),
+		Entry("stream repo name mismatch", "quay.io/tenant/chart-4-22", "product-chart", true, false),
+		Entry("matching image repo", "quay.io/tenant/product-chart", "product-chart", true, true),
 	)
 })
 
 var _ = Describe("Client.PackageAndPush", func() {
+	It("pushes stream charts under the component image repository", func() {
+		opts := Options{
+			ChartDir:                   "/chart",
+			ChartName:                  "dpf-hcp-provisioner-chart",
+			ChartVersion:               "4.22.0",
+			AppVersion:                 "test",
+			ImageRepo:                  "quay.io/tenant/dpf-hcp-provisioner-chart-4-22",
+			Image:                      "quay.io/tenant/dpf-hcp-provisioner-chart-4-22:on-pr-abc",
+			PushChartToImageRepository: true,
+		}
+
+		client := &Client{
+			BuildDependencies: func(string) error { return nil },
+			PackageChart:      func(Options) (string, error) { return "/tmp/chart.tgz", nil },
+			PushChart: func(archive, dest, authFile string, strict bool) error {
+				Expect(dest).To(Equal("oci://quay.io/tenant/dpf-hcp-provisioner-chart-4-22:4.22.0"))
+				Expect(strict).To(BeFalse())
+				return nil
+			},
+			CopyImage: func(_ context.Context, src, dst string) error {
+				Expect(src).To(Equal("quay.io/tenant/dpf-hcp-provisioner-chart-4-22:4.22.0"))
+				Expect(dst).To(Equal(opts.Image))
+				return nil
+			},
+			ChartDigest: func(_ context.Context, ref string) (string, error) {
+				Expect(ref).To(Equal("quay.io/tenant/dpf-hcp-provisioner-chart-4-22:4.22.0"))
+				return "sha256:stream", nil
+			},
+			ScopedAuth: func(string) (string, error) { return "/tmp/auth.json", nil },
+		}
+
+		result, err := client.PackageAndPush(context.Background(), opts)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.ImageURL).To(Equal("quay.io/tenant/dpf-hcp-provisioner-chart-4-22:4.22.0"))
+		Expect(result.ImageDigest).To(Equal("sha256:stream"))
+	})
+
+	It("pushes shared charts flat to the image repository with strict mode", func() {
+		opts := Options{
+			ChartDir:                   "/chart",
+			ChartName:                  "dpf-hcp-provisioner-chart",
+			ChartVersion:               "4.22.0",
+			AppVersion:                 "test",
+			ImageRepo:                  "quay.io/tenant/dpf-hcp-provisioner-chart",
+			Image:                      "quay.io/tenant/dpf-hcp-provisioner-chart:on-pr-abc",
+			PushChartToImageRepository: true,
+		}
+
+		client := &Client{
+			BuildDependencies: func(string) error { return nil },
+			PackageChart:      func(Options) (string, error) { return "/tmp/chart.tgz", nil },
+			PushChart: func(archive, dest, authFile string, strict bool) error {
+				Expect(dest).To(Equal("oci://quay.io/tenant/dpf-hcp-provisioner-chart:4.22.0"))
+				Expect(strict).To(BeTrue())
+				return nil
+			},
+			CopyImage:   func(context.Context, string, string) error { return nil },
+			ChartDigest: func(context.Context, string) (string, error) { return "sha256:shared", nil },
+			ScopedAuth:  func(string) (string, error) { return "/tmp/auth.json", nil },
+		}
+
+		result, err := client.PackageAndPush(context.Background(), opts)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.ImageURL).To(Equal("quay.io/tenant/dpf-hcp-provisioner-chart:4.22.0"))
+	})
+
 	It("pushes decoupled chart names to the chart repository path", func() {
 		opts := Options{
 			ChartDir:     "/chart",
@@ -63,8 +188,9 @@ var _ = Describe("Client.PackageAndPush", func() {
 		client := &Client{
 			BuildDependencies: func(string) error { return nil },
 			PackageChart:      func(Options) (string, error) { return "/tmp/product-chart.tgz", nil },
-			PushChart: func(archive, dest, authFile string) error {
+			PushChart: func(archive, dest, authFile string, strict bool) error {
 				Expect(dest).To(Equal("oci://quay.io/org/product-chart:1.0.0"))
+				Expect(strict).To(BeTrue())
 				return nil
 			},
 			CopyImage: func(_ context.Context, src, dst string) error {
@@ -99,10 +225,11 @@ var _ = Describe("Client.PackageAndPush", func() {
 			PackageChart: func(Options) (string, error) {
 				return "/tmp/my-chart.tgz", nil
 			},
-			PushChart: func(archive, dest, authFile string) error {
+			PushChart: func(archive, dest, authFile string, strict bool) error {
 				Expect(archive).To(Equal("/tmp/my-chart.tgz"))
 				Expect(dest).To(Equal("oci://quay.io/org/my-chart:1.0.0+build"))
 				Expect(authFile).To(Equal("/tmp/auth.json"))
+				Expect(strict).To(BeTrue())
 				return nil
 			},
 			CopyImage: func(_ context.Context, src, dst string) error {
@@ -127,7 +254,7 @@ var _ = Describe("Client.PackageAndPush", func() {
 		client := &Client{
 			BuildDependencies: func(string) error { return nil },
 			PackageChart:      func(Options) (string, error) { return "/tmp/x.tgz", nil },
-			PushChart:         func(string, string, string) error { return nil },
+			PushChart:         func(string, string, string, bool) error { return nil },
 			CopyImage:         func(context.Context, string, string) error { return nil },
 			ChartDigest:       func(context.Context, string) (string, error) { return "", errors.New("no digest") },
 			ScopedAuth:        func(string) (string, error) { return "/tmp/auth.json", nil },
@@ -171,13 +298,13 @@ var _ = Describe("Client.PackageAndPush", func() {
 			BuildDependencies: func(string) error { return nil },
 			PackageChart:      func(Options) (string, error) { return "/tmp/x.tgz", nil },
 			ScopedAuth:        func(string) (string, error) { return "/tmp/auth.json", nil },
-			PushChart:         func(string, string, string) error { return errors.New("boom") },
+			PushChart:         func(string, string, string, bool) error { return errors.New("boom") },
 		}),
 		Entry("copy image", &Client{
 			BuildDependencies: func(string) error { return nil },
 			PackageChart:      func(Options) (string, error) { return "/tmp/x.tgz", nil },
 			ScopedAuth:        func(string) (string, error) { return "/tmp/auth.json", nil },
-			PushChart:         func(string, string, string) error { return nil },
+			PushChart:         func(string, string, string, bool) error { return nil },
 			CopyImage:         func(context.Context, string, string) error { return errors.New("boom") },
 		}),
 	)
@@ -399,12 +526,41 @@ var _ = Describe("Push integration", func() {
 	})
 
 	It("returns error when archive is missing", func() {
-		Expect(pushChart(filepath.Join(GinkgoT().TempDir(), "missing.tgz"), "oci://x", "/tmp/auth")).NotTo(Succeed())
+		Expect(pushChart(filepath.Join(GinkgoT().TempDir(), "missing.tgz"), "oci://x", "/tmp/auth", true)).NotTo(Succeed())
 	})
 
 	It("returns error when credentials file is missing", func() {
 		archive := filepath.Join(GinkgoT().TempDir(), "chart.tgz")
 		Expect(os.WriteFile(archive, []byte("not-a-chart"), 0o644)).To(Succeed())
-		Expect(pushChart(archive, "oci://quay.io/org/chart:1.0.0", filepath.Join(GinkgoT().TempDir(), "missing.json"))).NotTo(Succeed())
+		Expect(pushChart(archive, "oci://quay.io/org/chart:1.0.0", filepath.Join(GinkgoT().TempDir(), "missing.json"), true)).NotTo(Succeed())
+	})
+
+	It("disables Helm strict mode when repo basename differs from chart name", func() {
+		archive := filepath.Join(GinkgoT().TempDir(), "chart.tgz")
+		data := packageTestChart("product-chart", "1.0.0")
+		Expect(os.WriteFile(archive, data, 0o644)).To(Succeed())
+
+		home := GinkgoT().TempDir()
+		configDir := filepath.Join(home, ".docker")
+		Expect(os.MkdirAll(configDir, 0o755)).To(Succeed())
+		Expect(os.WriteFile(
+			filepath.Join(configDir, "config.json"),
+			[]byte(`{"auths":{"quay.io/tenant/chart-4-22":{}}}`),
+			0o600,
+		)).To(Succeed())
+		GinkgoT().Setenv("HOME", home)
+
+		authFile, err := scopedRegistryAuth("quay.io/tenant/chart-4-22")
+		Expect(err).NotTo(HaveOccurred())
+		defer os.Remove(authFile)
+
+		dest := "oci://quay.io/tenant/chart-4-22:1.0.0"
+		errStrict := pushChart(archive, dest, authFile, true)
+		Expect(errStrict).To(HaveOccurred())
+		Expect(errStrict.Error()).To(ContainSubstring("strict mode"))
+
+		errLoose := pushChart(archive, dest, authFile, false)
+		Expect(errLoose).To(HaveOccurred())
+		Expect(errLoose.Error()).NotTo(ContainSubstring("strict mode"))
 	})
 })
