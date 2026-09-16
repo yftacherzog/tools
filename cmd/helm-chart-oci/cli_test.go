@@ -146,6 +146,76 @@ var _ = Describe("CLI", func() {
 		Expect(err.Error()).To(ContainSubstring("OVERWRITE_CHART_NAME"))
 	})
 
+	It("parses push chart to image repository from env and flag", func() {
+		env := func(key string) string {
+			switch key {
+			case "IMAGE":
+				return "quay.io/org/chart:tag"
+			case "CHART_VERSION":
+				return "1.0.0"
+			case "PUSH_CHART_TO_IMAGE_REPOSITORY":
+				return "true"
+			default:
+				return ""
+			}
+		}
+
+		cfg, err := parseCLI(env, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.pushChartToImageRepository).To(BeTrue())
+
+		cfg, err = parseCLI(func(string) string { return "" }, []string{
+			"--image", "quay.io/org/chart:tag",
+			"--chart-version", "1.0.0",
+			"--push-chart-to-image-repository=true",
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.pushChartToImageRepository).To(BeTrue())
+	})
+
+	It("defaults push chart to image repository to false", func() {
+		cfg, err := parseCLI(func(string) string { return "" }, []string{
+			"--image", "quay.io/org/chart:tag",
+			"--chart-version", "1.0.0",
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.pushChartToImageRepository).To(BeFalse())
+	})
+
+	It("rejects invalid PUSH_CHART_TO_IMAGE_REPOSITORY env when flag is unset", func() {
+		env := func(key string) string {
+			switch key {
+			case "IMAGE":
+				return "quay.io/org/chart:tag"
+			case "CHART_VERSION":
+				return "1.0.0"
+			case "PUSH_CHART_TO_IMAGE_REPOSITORY":
+				return "maybe"
+			default:
+				return ""
+			}
+		}
+
+		_, err := parseCLI(env, nil)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("PUSH_CHART_TO_IMAGE_REPOSITORY"))
+	})
+
+	It("passes push chart to image repository to Run", func() {
+		var got helmchartoci.RunOptions
+		Expect(execute(context.Background(), cliConfig{
+			image:                      "quay.io/org/chart:tag",
+			chartVersion:               "1.0.0",
+			sourceCodeDir:              "source",
+			chartContext:               "chart",
+			pushChartToImageRepository: true,
+		}, func(_ context.Context, opts helmchartoci.RunOptions) error {
+			got = opts
+			return nil
+		})).To(Succeed())
+		Expect(got.PushChartToImageRepository).To(BeTrue())
+	})
+
 	It("passes overwrite chart name to Run", func() {
 		var got helmchartoci.RunOptions
 		Expect(execute(context.Background(), cliConfig{

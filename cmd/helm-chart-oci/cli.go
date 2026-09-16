@@ -11,19 +11,20 @@ import (
 )
 
 type cliConfig struct {
-	image              string
-	commitSHA          string
-	sourceCodeDir      string
-	chartContext       string
-	tagPrefix          string
-	versionSuffix      string
-	chartVersion       string
-	appVersion         string
-	imageMappings      string
-	imageURLResult     string
-	imageDigestResult  string
-	overwriteChartName bool
-	valuesFiles        []string
+	image                      string
+	commitSHA                  string
+	sourceCodeDir              string
+	chartContext               string
+	tagPrefix                  string
+	versionSuffix              string
+	chartVersion               string
+	appVersion                 string
+	imageMappings              string
+	imageURLResult             string
+	imageDigestResult          string
+	overwriteChartName         bool
+	pushChartToImageRepository bool
+	valuesFiles                []string
 }
 
 func parseCLI(env func(string) string, args []string) (cliConfig, error) {
@@ -43,26 +44,35 @@ func parseCLI(env func(string) string, args []string) (cliConfig, error) {
 	imageDigestResult := fs.String("image-digest-result", "", "Path to write IMAGE_DIGEST result")
 	overwriteChartNameFlag := fs.Bool("overwrite-chart-name", true,
 		"Rewrite Chart.yaml name from IMAGE repo basename (0.3 behavior)")
+	pushChartToImageRepositoryFlag := fs.Bool("push-chart-to-image-repository", false,
+		"Publish under the IMAGE repository (oci://<IMAGE>:<version>) instead of oci://<parent(IMAGE)>/<chart-name>:<version>; use with OVERWRITE_CHART_NAME=false")
 
 	if err := fs.Parse(args); err != nil {
 		return cliConfig{}, err
 	}
 
-	overwriteChartName := *overwriteChartNameFlag
-	overwriteChartNameSet := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "overwrite-chart-name" {
-			overwriteChartNameSet = true
-		}
-	})
-	if !overwriteChartNameSet {
-		if envVal := env("OVERWRITE_CHART_NAME"); envVal != "" {
-			parsed, err := helmchartoci.ParseOverwriteChartName(envVal)
-			if err != nil {
-				return cliConfig{}, err
-			}
-			overwriteChartName = parsed
-		}
+	overwriteChartName, err := boolFlagWithEnv(
+		fs,
+		"overwrite-chart-name",
+		*overwriteChartNameFlag,
+		env,
+		"OVERWRITE_CHART_NAME",
+		helmchartoci.ParseOverwriteChartName,
+	)
+	if err != nil {
+		return cliConfig{}, err
+	}
+
+	pushChartToImageRepository, err := boolFlagWithEnv(
+		fs,
+		"push-chart-to-image-repository",
+		*pushChartToImageRepositoryFlag,
+		env,
+		"PUSH_CHART_TO_IMAGE_REPOSITORY",
+		helmchartoci.ParsePushChartToImageRepository,
+	)
+	if err != nil {
+		return cliConfig{}, err
 	}
 
 	valuesFiles := fs.Args()
@@ -78,19 +88,20 @@ func parseCLI(env func(string) string, args []string) (cliConfig, error) {
 	}
 
 	return cliConfig{
-		image:              *image,
-		commitSHA:          *commitSHA,
-		sourceCodeDir:      *sourceCodeDir,
-		chartContext:       *chartContext,
-		tagPrefix:          *tagPrefix,
-		versionSuffix:      *versionSuffix,
-		chartVersion:       *chartVersion,
-		appVersion:         *appVersion,
-		imageMappings:      *imageMappings,
-		imageURLResult:     *imageURLResult,
-		imageDigestResult:  *imageDigestResult,
-		overwriteChartName: overwriteChartName,
-		valuesFiles:        valuesFiles,
+		image:                      *image,
+		commitSHA:                  *commitSHA,
+		sourceCodeDir:              *sourceCodeDir,
+		chartContext:               *chartContext,
+		tagPrefix:                  *tagPrefix,
+		versionSuffix:              *versionSuffix,
+		chartVersion:               *chartVersion,
+		appVersion:                 *appVersion,
+		imageMappings:              *imageMappings,
+		imageURLResult:             *imageURLResult,
+		imageDigestResult:          *imageDigestResult,
+		overwriteChartName:         overwriteChartName,
+		pushChartToImageRepository: pushChartToImageRepository,
+		valuesFiles:                valuesFiles,
 	}, nil
 }
 
@@ -106,20 +117,21 @@ func execute(ctx context.Context, cfg cliConfig, runFn func(context.Context, hel
 	}
 
 	return runFn(ctx, helmchartoci.RunOptions{
-		Image:              cfg.image,
-		CommitSHA:          cfg.commitSHA,
-		SourceCodeDir:      cfg.sourceCodeDir,
-		ChartContext:       cfg.chartContext,
-		TagPrefix:          cfg.tagPrefix,
-		VersionSuffix:      cfg.versionSuffix,
-		ChartVersion:       cfg.chartVersion,
-		AppVersion:         cfg.appVersion,
-		ImageMappings:      cfg.imageMappings,
-		ValuesFiles:        cfg.valuesFiles,
-		ImageURLResult:     cfg.imageURLResult,
-		ImageDigestResult:  cfg.imageDigestResult,
-		OverwriteChartName: &cfg.overwriteChartName,
-		Git:                git,
+		Image:                      cfg.image,
+		CommitSHA:                  cfg.commitSHA,
+		SourceCodeDir:              cfg.sourceCodeDir,
+		ChartContext:               cfg.chartContext,
+		TagPrefix:                  cfg.tagPrefix,
+		VersionSuffix:              cfg.versionSuffix,
+		ChartVersion:               cfg.chartVersion,
+		AppVersion:                 cfg.appVersion,
+		ImageMappings:              cfg.imageMappings,
+		ValuesFiles:                cfg.valuesFiles,
+		ImageURLResult:             cfg.imageURLResult,
+		ImageDigestResult:          cfg.imageDigestResult,
+		OverwriteChartName:         &cfg.overwriteChartName,
+		PushChartToImageRepository: cfg.pushChartToImageRepository,
+		Git:                        git,
 	})
 }
 
@@ -128,4 +140,27 @@ func envOr(env func(string) string, key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func boolFlagWithEnv(
+	fs *flag.FlagSet,
+	flagName string,
+	flagValue bool,
+	env func(string) string,
+	envKey string,
+	parse func(string) (bool, error),
+) (bool, error) {
+	setOnCLI := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == flagName {
+			setOnCLI = true
+		}
+	})
+	if setOnCLI {
+		return flagValue, nil
+	}
+	if envVal := env(envKey); envVal != "" {
+		return parse(envVal)
+	}
+	return flagValue, nil
 }

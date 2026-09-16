@@ -107,6 +107,32 @@ version: 0.1.0
 		Expect(helmchartoci.OverwriteChartNameEnabled(&falseVal)).To(BeFalse())
 	})
 
+	DescribeTable("ParsePushChartToImageRepository",
+		func(value string, want bool, wantErr bool) {
+			got, err := helmchartoci.ParsePushChartToImageRepository(value)
+			if wantErr {
+				Expect(err).To(HaveOccurred())
+				return
+			}
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got).To(Equal(want))
+		},
+		Entry("empty defaults false", "", false, false),
+		Entry("true", "true", true, false),
+		Entry("false", "false", false, false),
+		Entry("invalid", "maybe", false, true),
+	)
+
+	DescribeTable("EffectivePushChartToImageRepository",
+		func(pushToImageRepo bool, overwrite *bool, want bool) {
+			Expect(helmchartoci.EffectivePushChartToImageRepository(pushToImageRepo, overwrite)).To(Equal(want))
+		},
+		Entry("push disabled", false, nil, false),
+		Entry("push enabled with overwrite default", true, nil, false),
+		Entry("push enabled with overwrite true", true, ptrBool(true), false),
+		Entry("push enabled with overwrite false", true, ptrBool(false), true),
+	)
+
 	It("rewrites only the name field in Chart.yaml", func() {
 		chartDir := GinkgoT().TempDir()
 		original := `apiVersion: v2
@@ -146,3 +172,7 @@ dependencies:
 		})
 	})
 })
+
+func ptrBool(v bool) *bool {
+	return &v
+}

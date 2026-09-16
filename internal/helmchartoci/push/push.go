@@ -29,6 +29,9 @@ type Options struct {
 	AppVersion   string
 	ImageRepo    string
 	Image        string
+	// PushChartToImageRepository pushes under IMAGE's repository instead of the
+	// tenant-level chart-name path used when Chart.yaml name differs from IMAGE.
+	PushChartToImageRepository bool
 }
 
 // Result contains Tekton-compatible task results.
@@ -64,7 +67,7 @@ func readChartYAML(chartDir string) (chartYAML, error) {
 type Client struct {
 	BuildDependencies func(chartDir string) error
 	PackageChart      func(opts Options) (string, error)
-	PushChart         func(archive, dest, authFile string) error
+	PushChart         func(archive, dest, authFile string, strict bool) error
 	CopyImage         func(ctx context.Context, src, dst string) error
 	ChartDigest       func(ctx context.Context, ref string) (string, error)
 	ScopedAuth        func(imageRepo string) (string, error)
@@ -110,12 +113,13 @@ func (c *Client) PackageAndPush(ctx context.Context, opts Options) (Result, erro
 	defer os.Remove(authFile)
 
 	ociTag := ociChartTag(opts.ChartVersion)
-	dest := ociPushRef(opts.ImageRepo, opts.ChartName, opts.ChartVersion)
-	if err := c.PushChart(archive, dest, authFile); err != nil {
+	dest := ociPushRef(opts.ImageRepo, opts.ChartName, opts.ChartVersion, opts.PushChartToImageRepository)
+	strict := chartPushStrictMode(opts.ImageRepo, opts.ChartName, opts.PushChartToImageRepository)
+	if err := c.PushChart(archive, dest, authFile, strict); err != nil {
 		return Result{}, err
 	}
 
-	pushed := pushedChartRef(opts.ImageRepo, opts.ChartName, ociTag)
+	pushed := pushedChartRef(opts.ImageRepo, opts.ChartName, ociTag, opts.PushChartToImageRepository)
 	if err := c.CopyImage(ctx, pushed, opts.Image); err != nil {
 		return Result{}, fmt.Errorf("tag chart with %s: %w", opts.Image, err)
 	}
@@ -219,7 +223,7 @@ func packageChart(opts Options) (string, error) {
 	return archive, nil
 }
 
-func pushChart(archive, dest, authFile string) error {
+func pushChart(archive, dest, authFile string, strict bool) error {
 	data, err := os.ReadFile(archive)
 	if err != nil {
 		return fmt.Errorf("read chart archive: %w", err)
@@ -233,7 +237,11 @@ func pushChart(archive, dest, authFile string) error {
 	if err != nil {
 		return fmt.Errorf("create registry client: %w", err)
 	}
-	_, err = client.Push(data, dest)
+	pushOpts := []registry.PushOption{}
+	if !strict {
+		pushOpts = append(pushOpts, registry.PushOptStrictMode(false))
+	}
+	_, err = client.Push(data, dest, pushOpts...)
 	if err != nil {
 		return fmt.Errorf("push chart to %s: %w", dest, err)
 	}
@@ -247,16 +255,45 @@ func parentRepo(imageRepo string) string {
 	return imageRepo
 }
 
-// ociPushRef builds the OCI reference Helm expects in strict mode, matching
-// helm push: parent(imageRepo)/chartName:chartVersion.
-func ociPushRef(imageRepo, chartName, chartVersion string) string {
-	return fmt.Sprintf("oci://%s/%s:%s", parentRepo(imageRepo), chartName, chartVersion)
+func repoBasename(imageRepo string) string {
+	if idx := strings.LastIndex(imageRepo, "/"); idx >= 0 {
+		return imageRepo[idx+1:]
+	}
+	return imageRepo
+}
+
+// chartOCIRepository returns the registry path (without tag) for the chart push.
+// When pushToImageRepo is false, charts with a different Chart.yaml name are
+// published under parent(imageRepo)/chartName so multiple components can share
+// one delivery chart path. When true, charts are published under imageRepo so
+// each Konflux ImageRepository receives artifacts in its credentialed repo
+// while Chart.yaml metadata stays unchanged.
+func chartOCIRepository(imageRepo, chartName string, pushToImageRepo bool) string {
+	if !pushToImageRepo {
+		return parentRepo(imageRepo) + "/" + chartName
+	}
+	return imageRepo
+}
+
+// chartPushStrictMode reports whether Helm's push strict check can stay enabled.
+// Strict mode requires the OCI ref to end with /chartName:version. When pushing
+// flat to imageRepo while Chart.yaml name differs from the repo basename, strict
+// mode must be disabled.
+func chartPushStrictMode(imageRepo, chartName string, pushToImageRepo bool) bool {
+	if !pushToImageRepo {
+		return true
+	}
+	return repoBasename(imageRepo) == chartName
+}
+
+// ociPushRef builds the OCI reference Helm expects in strict mode.
+func ociPushRef(imageRepo, chartName, chartVersion string, pushToImageRepo bool) string {
+	return fmt.Sprintf("oci://%s:%s", chartOCIRepository(imageRepo, chartName, pushToImageRepo), chartVersion)
 }
 
 // pushedChartRef returns the registry reference of the chart artifact after push.
-// The chart name may differ from the IMAGE repo basename when Chart.yaml name is preserved.
-func pushedChartRef(imageRepo, chartName, ociTag string) string {
-	return fmt.Sprintf("%s/%s:%s", parentRepo(imageRepo), chartName, ociTag)
+func pushedChartRef(imageRepo, chartName, ociTag string, pushToImageRepo bool) string {
+	return fmt.Sprintf("%s:%s", chartOCIRepository(imageRepo, chartName, pushToImageRepo), ociTag)
 }
 
 // ociChartTag replaces '+' with '_' for OCI registry tags (Helm convention).

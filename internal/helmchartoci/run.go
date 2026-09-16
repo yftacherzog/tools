@@ -22,21 +22,22 @@ func (defaultChartPusher) PackageAndPush(ctx context.Context, opts push.Options)
 
 // RunOptions mirrors build-helm-chart-oci-ta 0.3 parameters.
 type RunOptions struct {
-	Image              string
-	CommitSHA          string
-	SourceCodeDir      string
-	ChartContext       string
-	TagPrefix          string
-	VersionSuffix      string
-	ChartVersion       string
-	AppVersion         string
-	ImageMappings      string
-	ValuesFiles        []string
-	ImageURLResult     string
-	ImageDigestResult  string
-	OverwriteChartName *bool
-	Git                Git
-	Pusher             ChartPusher
+	Image                      string
+	CommitSHA                  string
+	SourceCodeDir              string
+	ChartContext               string
+	TagPrefix                  string
+	VersionSuffix              string
+	ChartVersion               string
+	AppVersion                 string
+	ImageMappings              string
+	ValuesFiles                []string
+	ImageURLResult             string
+	ImageDigestResult          string
+	OverwriteChartName         *bool
+	PushChartToImageRepository bool
+	Git                        Git
+	Pusher                     ChartPusher
 }
 
 // Run packages and pushes a Helm chart to OCI. See package helmchartoci documentation
@@ -79,13 +80,19 @@ func Run(ctx context.Context, opts RunOptions) error {
 		pusher = defaultChartPusher{}
 	}
 
+	pushToImageRepo := EffectivePushChartToImageRepository(
+		opts.PushChartToImageRepository,
+		opts.OverwriteChartName,
+	)
+
 	result, err := pusher.PackageAndPush(ctx, push.Options{
-		ChartDir:     chartDir,
-		ChartName:    chartName,
-		ChartVersion: chartVersion,
-		AppVersion:   appVersion,
-		ImageRepo:    repo,
-		Image:        opts.Image,
+		ChartDir:                   chartDir,
+		ChartName:                  chartName,
+		ChartVersion:               chartVersion,
+		AppVersion:                 appVersion,
+		ImageRepo:                  repo,
+		Image:                      opts.Image,
+		PushChartToImageRepository: pushToImageRepo,
 	})
 	if err != nil {
 		return err
