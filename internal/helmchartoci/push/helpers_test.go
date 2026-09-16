@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -73,4 +74,47 @@ func writeParentWithFileDependency(chartDir string) {
 	Expect(os.MkdirAll(depDir, 0o755)).To(Succeed())
 	writeSubchart(depDir, "subchart", "1.0.0")
 	writeParentChart(chartDir, "subchart", "1.0.0", "file://./deps/subchart")
+}
+
+type httpChartDependency struct {
+	Name    string
+	Version string
+}
+
+type httpChartDependencyWithRepo struct {
+	Name       string
+	Version    string
+	Repository string
+}
+
+func writeParentWithDistinctHTTPDependencies(chartDir string, deps ...httpChartDependencyWithRepo) {
+	var depLines strings.Builder
+	for _, dep := range deps {
+		depLines.WriteString(fmt.Sprintf(`  - name: %s
+    version: %s
+    repository: %s
+`, dep.Name, dep.Version, dep.Repository))
+	}
+	chartYAML := fmt.Sprintf(`apiVersion: v2
+name: parent
+version: 0.1.0
+dependencies:
+%s`, depLines.String())
+	Expect(os.WriteFile(filepath.Join(chartDir, "Chart.yaml"), []byte(chartYAML), 0o644)).To(Succeed())
+}
+
+func writeParentWithHTTPDependencies(chartDir, repository string, deps ...httpChartDependency) {
+	var depLines strings.Builder
+	for _, dep := range deps {
+		depLines.WriteString(fmt.Sprintf(`  - name: %s
+    version: %s
+    repository: %s
+`, dep.Name, dep.Version, repository))
+	}
+	chartYAML := fmt.Sprintf(`apiVersion: v2
+name: parent
+version: 0.1.0
+dependencies:
+%s`, depLines.String())
+	Expect(os.WriteFile(filepath.Join(chartDir, "Chart.yaml"), []byte(chartYAML), 0o644)).To(Succeed())
 }

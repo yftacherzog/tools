@@ -20,8 +20,10 @@
 //     OCI, then tag the IMAGE reference.
 //  6. Write IMAGE_URL and IMAGE_DIGEST task results when paths are set.
 //
-// Chart dependencies are built when Chart.yaml declares dependencies; see the
-// push package.
+// Chart dependencies are built when Chart.yaml declares dependencies. HTTP(S)
+// repository URLs are registered in Helm's repositories file before dependency
+// build. Host-only URLs use the same repository naming as build-helm-chart-oci-ta
+// 0.3; URLs with a path get a unique suffix. See the push package.
 //
 // # Versioning
 //

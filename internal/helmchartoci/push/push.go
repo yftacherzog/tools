@@ -37,10 +37,26 @@ type Result struct {
 	ImageDigest string
 }
 
+type chartDependency struct {
+	Name       string `yaml:"name"`
+	Repository string `yaml:"repository"`
+}
+
 type chartYAML struct {
-	Dependencies []struct {
-		Name string `yaml:"name"`
-	} `yaml:"dependencies"`
+	Dependencies []chartDependency `yaml:"dependencies"`
+}
+
+func readChartYAML(chartDir string) (chartYAML, error) {
+	path := filepath.Join(chartDir, "Chart.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return chartYAML{}, fmt.Errorf("read Chart.yaml: %w", err)
+	}
+	var meta chartYAML
+	if err := yaml.Unmarshal(data, &meta); err != nil {
+		return chartYAML{}, fmt.Errorf("parse Chart.yaml: %w", err)
+	}
+	return meta, nil
 }
 
 // Client orchestrates chart packaging and OCI publication. Dependencies are
@@ -155,12 +171,17 @@ func buildDependencies(chartDir string) error {
 }
 
 func buildDependenciesWith(chartDir string, cfg dependencyManagerConfig) error {
-	if !chartHasDependencies(chartDir) {
+	meta, err := readChartYAML(chartDir)
+	if err != nil || len(meta.Dependencies) == 0 {
 		return nil
 	}
 
-	cfg, err := cfg.resolved()
+	cfg, err = cfg.resolved()
 	if err != nil {
+		return err
+	}
+
+	if err := registerHTTPChartRepositoriesFromChart(meta, cfg.settings, cfg.getters); err != nil {
 		return err
 	}
 
@@ -180,13 +201,8 @@ func buildDependenciesWith(chartDir string, cfg dependencyManagerConfig) error {
 }
 
 func chartHasDependencies(chartDir string) bool {
-	path := filepath.Join(chartDir, "Chart.yaml")
-	data, err := os.ReadFile(path)
+	meta, err := readChartYAML(chartDir)
 	if err != nil {
-		return false
-	}
-	var meta chartYAML
-	if err := yaml.Unmarshal(data, &meta); err != nil {
 		return false
 	}
 	return len(meta.Dependencies) > 0
